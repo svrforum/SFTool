@@ -102,25 +102,47 @@ Discover  디스크 열거 → 각 디스크의 볼륨 열거
 
 Confirm   안전 인터록 통과 + 사용자 명시 확인
 
-Acquire   마운트 지점 제거 (DefineDosDevice / DeleteVolumeMountPoint)
-          디스크 위 모든 볼륨에 대해:
+Acquire   마운트 지점 제거 (DefineDosDevice → DeleteVolumeMountPoint)
+          논리 볼륨 핸들을 최소 하나 확보해 잠근다:
             CreateFile → FSCTL_ALLOW_EXTENDED_DASD_IO → FSCTL_LOCK_VOLUME → FSCTL_DISMOUNT_VOLUME
-          15초 한도 재시도 루프, 중간에 FILE_SHARE_WRITE 폴백
-          그 다음에야 \\.\PhysicalDriveN 을 R/W로 연다
+          나머지 파티션은 잠그지 않는다 — 문자 제거 + RAW 레이아웃으로
+          "마운트된 볼륨에 속하지 않는 섹터"로 만들어 제한을 푼다
+          물리 핸들 잠금은 best-effort. 실패해도 중단하지 않는다
+          재시도: SHARING_VIOLATION / ACCESS_DENIED 에만, 150회 × 100ms,
+                  1/3 지점부터 FILE_SHARE_WRITE 추가
 
-Prepare   머리 8MB, 꼬리 1MB를 0으로 덮어쓴다
-          IOCTL_DISK_DELETE_DRIVE_LAYOUT 만으로는 부족하다 — 꼬리의 GPT 백업 헤더가
-          남으면 Windows가 옛 파티션 테이블을 되살린다
+Prepare   준비용 물리 핸들 #1 열기
+          IOCTL_DISK_CREATE_DISK(PARTITION_STYLE_RAW) → IOCTL_DISK_UPDATE_PROPERTIES
+          핸들 #1 닫기  ← 재열거를 넘겨 유지하면 ERROR_MEDIA_CHANGED(1110)
+          꼬리 1MiB 0으로 덮어쓰기 (IOCTL_DISK_GET_LENGTH_INFO 로 정확한 크기 확보)
 
-Write     섹터 정렬 필수: 크기·오프셋·버퍼 주소 모두 섹터 배수
-          섹터 크기는 IOCTL_DISK_GET_DRIVE_GEOMETRY_EX 로 조회한다 (512 가정 금지)
-          청크 단위 이중 버퍼링, 마지막 청크는 섹터 배수로 패딩
+Write     쓰기용 물리 핸들 #2 를 새로 연다
+          쓰기 길이와 오프셋은 반드시 논리 섹터 크기의 배수 (위반 시 ERROR_INVALID_PARAMETER 87)
+          버퍼 주소 정렬은 권장 사항이며 강제는 아니다 — 그래도 정렬해 둔다
+          섹터 크기는 장치에서 조회한다 (512 가정 금지, 512 미만이면 중단)
+          32MiB × 2 이중 버퍼. 마지막 청크 패딩 버퍼는 명시적으로 0으로 채운다
+          짧은 쓰기(TRUE 이면서 written < toWrite)는 오류로 취급해
+          청크 시작으로 되감고 4회까지 재시도
 
 Verify    (선택, 기본 꺼짐) 되읽어 해시 대조
 
 Finish    FlushFileBuffers → IOCTL_DISK_UPDATE_PROPERTIES
-          → 모든 볼륨 FSCTL_UNLOCK_VOLUME + 닫기 → 꺼내기
+          → 볼륨 FSCTL_UNLOCK_VOLUME + 닫기 → 물리 핸들 닫기(수 초 걸릴 수 있음)
+          → IOCTL_STORAGE_MEDIA_REMOVAL(Prevent=FALSE) → IOCTL_STORAGE_EJECT_MEDIA
 ```
+
+### 검증 단계에서 뒤집힌 것들
+
+1차 조사 내용 중 다음은 **반증되어 위 시퀀스에서 제외**했다. 기록해 두지 않으면
+나중에 "왜 이렇게 안 했지" 하며 되돌리기 쉬운 것들이다.
+
+| 반증된 주장 | 실제 |
+|---|---|
+| 디스크 위 **모든** 볼륨을 잠근다 | 조사자의 창작이며 fail-closed 로 망가진다. 잠기지 않는 파티션 하나가 전체를 중단시킨다. 논리 볼륨 하나만 확실히 잠그고 나머지는 RAW 레이아웃으로 해결한다 |
+| `IOCTL_DISK_DELETE_DRIVE_LAYOUT` 를 쓴다 | Rufus 는 이 호출을 하지 않는다. MBR 전용 의미라 GPT 백업 헤더에 아무 효과가 없다. `CREATE_DISK(RAW)` 가 맞다 |
+| Rufus 가 머리 8MB 를 0으로 지운다 | DD 경로에서는 `ClearMBRGPT` 를 건너뛴다. 머리 지우기는 불필요하고, 꼬리 1MiB 지우기는 Rufus 근거가 아니라 우리 판단으로 한다 (이미지가 스틱보다 작을 때 남는 GPT 백업 헤더) |
+| 물리 핸들 하나로 준비와 쓰기를 모두 처리 | 재열거를 넘긴 핸들은 `ERROR_MEDIA_CHANGED(1110)` 를 낸다. 준비용과 쓰기용을 분리한다 |
+| 버퍼 주소 정렬이 필수 | 문서상 "강제되지 않을 수 있다". 길이·오프셋 정렬만 필수다 |
 
 ### 명시적으로 하지 않는 것
 

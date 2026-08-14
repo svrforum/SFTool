@@ -13,6 +13,38 @@
 use super::model::{BusType, DiskInfo};
 use std::collections::HashSet;
 
+/// 로더 이미지를 담기 위한 최소 USB 용량.
+///
+/// m-shell 표준판이 압축 해제 후 3.03GB, RR 이 3.76GB 다. 명목 4GB 스틱은 실제 포맷
+/// 용량이 3.7GB 안팎이라 여유가 거의 없거나 아예 모자란다. 이미지 크기는 릴리스마다
+/// 커지는 추세이므로 4GB 는 아예 지원 대상에서 제외한다.
+pub const MIN_USB_BYTES: u64 = 8 * 1000 * 1000 * 1000;
+
+/// 목록에서의 디스크 상태.
+///
+/// "숨김"과 "비활성"을 구분하는 것이 중요하다. 쓸 수 없는 USB 를 목록에서 아예 없애면
+/// 사용자는 장치가 인식되지 않았다고 오해하고 USB 를 다시 꽂거나 포트를 바꾸며 헤맨다.
+/// 위험해서 감춰야 하는 것(내장 디스크)과 이유를 알려줘야 하는 것(읽기 전용, 용량 부족)은
+/// 다른 처리를 받아야 한다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Availability {
+    /// 선택 가능.
+    Ready,
+    /// 목록에 보이되 선택할 수 없다. 사유를 함께 표시한다.
+    Disabled(Rejection),
+    /// 목록에 아예 나타나지 않는다. 내장 디스크 등 보여주면 위험한 것들.
+    Hidden(Rejection),
+}
+
+impl Availability {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Availability::Ready)
+    }
+    pub fn is_visible(&self) -> bool {
+        !matches!(self, Availability::Hidden(_))
+    }
+}
+
 /// 디스크를 대상 목록에서 제외하는 이유.
 ///
 /// UI에 그대로 노출할 수 있도록 사유를 구분해 둔다.
@@ -32,7 +64,9 @@ pub enum Rejection {
     NoMedia,
     /// 스팬/RAID 볼륨을 포함한다.
     SpannedVolume,
-    /// 이미지가 디스크보다 크다.
+    /// 어떤 로더 이미지도 담을 수 없을 만큼 작다.
+    BelowMinimumCapacity { have: u64, minimum: u64 },
+    /// 선택한 이미지가 이 디스크보다 크다.
     TooSmall { need: u64, have: u64 },
     /// 소스 이미지가 대상 디스크 위에 있다. 자기 자신을 덮어쓰게 된다.
     SourceOnTarget,
@@ -48,6 +82,7 @@ impl Rejection {
             self,
             Rejection::NoMedia
                 | Rejection::TooSmall { .. }
+                | Rejection::BelowMinimumCapacity { .. }
                 | Rejection::SourceOnTarget
                 | Rejection::SpannedVolume
                 | Rejection::ReadOnly
@@ -55,47 +90,85 @@ impl Rejection {
     }
 }
 
-/// 이 디스크를 사용자에게 **보여줘도** 되는가.
+/// 목록에서 **감춰야** 하는 이유가 있는가.
 ///
-/// 모든 조건을 통과해야만 통과다. 하나라도 걸리면 목록에 나타나지 않는다.
-pub fn is_listable(disk: &DiskInfo, protected: &HashSet<u32>) -> Result<(), Rejection> {
+/// 여기 걸리는 것들은 사용자에게 보여주는 것 자체가 위험하거나 의미가 없다.
+/// 내장 디스크는 애초에 선택지로 존재해서는 안 된다.
+///
+/// ## 판정 방향에 대하여
+///
+/// `is_system` 같은 플래그는 **참일 때만** 배제한다. "정보가 없으면 배제"로 만들면
+/// 안 되는데, `BootFromDisk` 는 ESP 가 여러 개인 시스템(SSD 두 장 꽂은 흔한 구성)에서
+/// 모든 디스크에 대해 값이 설정되지 않는 것으로 문서화돼 있기 때문이다.
+/// 그런 기계에서 "값 없음 = 배제"를 적용하면 목록이 통째로 비어버린다.
+///
+/// 반대로 `bus_type`, `number`, `size_bytes` 는 **적극적으로 확인돼야** 하는 값이다.
+/// 이것들을 못 읽었다면 열거 계층에서 아예 항목을 만들지 않는다.
+pub fn hidden_reason(disk: &DiskInfo, protected: &HashSet<u32>) -> Option<Rejection> {
     // 1차: USB 버스만. 이게 유일하게 신뢰할 수 있는 판정이다.
     if disk.bus_type != BusType::Usb {
-        return Err(Rejection::NotUsb(disk.bus_type));
+        return Some(Rejection::NotUsb(disk.bus_type));
     }
 
     // 디스크 0은 무조건 거부. 열거가 잘못돼 0이 흘러들어오면
     // 시스템 디스크의 MBR을 지우게 된다.
     if disk.number == 0 {
-        return Err(Rejection::DiskZero);
+        return Some(Rejection::DiskZero);
     }
 
-    // WMI가 알려주는 플래그들.
+    // 명시적으로 참인 경우에만 배제한다 (위 주석 참고).
     if disk.is_system || disk.is_boot || disk.boot_from_disk || disk.is_clustered {
-        return Err(Rejection::SystemDisk);
-    }
-
-    if disk.is_read_only {
-        return Err(Rejection::ReadOnly);
+        return Some(Rejection::SystemDisk);
     }
 
     // WMI와 무관하게 커널에 직접 물어 만든 보호 집합.
     // WMI 정보가 틀리거나 조작돼도 이 방어선은 남는다.
     if protected.contains(&disk.number) {
-        return Err(Rejection::Protected);
+        return Some(Rejection::Protected);
     }
 
-    // 카드 없는 카드리더 등.
+    // 카드 없는 카드리더. 표시할 것이 없다.
     if disk.size_bytes == 0 {
-        return Err(Rejection::NoMedia);
+        return Some(Rejection::NoMedia);
     }
 
     // 스팬/RAID 볼륨이 하나라도 있으면 건드리지 않는다.
     if disk.volumes.iter().any(|v| v.disk_extent_count > 1) {
-        return Err(Rejection::SpannedVolume);
+        return Some(Rejection::SpannedVolume);
     }
 
-    Ok(())
+    None
+}
+
+/// 목록에서의 상태를 판정한다.
+///
+/// 감출 것은 감추고, 쓸 수 없는 것은 **이유와 함께 비활성으로** 보여준다.
+pub fn availability(disk: &DiskInfo, protected: &HashSet<u32>) -> Availability {
+    if let Some(r) = hidden_reason(disk, protected) {
+        return Availability::Hidden(r);
+    }
+
+    // 여기부터는 "보이지만 못 쓰는" 사유들. 감추지 않는다 —
+    // 목록에 없으면 사용자는 장치가 인식되지 않았다고 오해한다.
+    if disk.is_read_only {
+        return Availability::Disabled(Rejection::ReadOnly);
+    }
+    if disk.size_bytes < MIN_USB_BYTES {
+        return Availability::Disabled(Rejection::BelowMinimumCapacity {
+            have: disk.size_bytes,
+            minimum: MIN_USB_BYTES,
+        });
+    }
+
+    Availability::Ready
+}
+
+/// 이 디스크를 사용자에게 보여줘도 되는가 (감춤 판정만).
+pub fn is_listable(disk: &DiskInfo, protected: &HashSet<u32>) -> Result<(), Rejection> {
+    match hidden_reason(disk, protected) {
+        Some(r) => Err(r),
+        None => Ok(()),
+    }
 }
 
 /// 이 디스크에 **실제로 쓸** 수 있는가.
@@ -111,7 +184,10 @@ pub fn can_write(
     image_size: u64,
     source_image_disk: Option<u32>,
 ) -> Result<(), Rejection> {
-    is_listable(disk, protected)?;
+    match availability(disk, protected) {
+        Availability::Hidden(r) | Availability::Disabled(r) => return Err(r),
+        Availability::Ready => {}
+    }
 
     if image_size > disk.size_bytes {
         return Err(Rejection::TooSmall {
@@ -282,11 +358,78 @@ mod tests {
         assert_eq!(is_listable(&d, &protected), Err(Rejection::Protected));
     }
 
+    // --- 숨김과 비활성의 구분 ---
+    //
+    // 쓸 수 없는 USB 를 목록에서 없애면 사용자는 장치 인식 실패로 오해하고
+    // 포트를 바꿔가며 헤맨다. 위험해서 감출 것과 이유를 알려줄 것을 구분한다.
+
     #[test]
-    fn read_only_rejected() {
+    fn read_only_disk_is_shown_but_disabled() {
         let mut d = usb_disk(2);
         d.is_read_only = true;
-        assert_eq!(is_listable(&d, &none()), Err(Rejection::ReadOnly));
+        // 감추지 않는다.
+        assert_eq!(is_listable(&d, &none()), Ok(()));
+        assert_eq!(
+            availability(&d, &none()),
+            Availability::Disabled(Rejection::ReadOnly)
+        );
+        assert!(availability(&d, &none()).is_visible());
+        assert!(!availability(&d, &none()).is_ready());
+    }
+
+    #[test]
+    fn undersized_disk_is_shown_but_disabled() {
+        // 4GB 스틱. 로더 이미지가 3.0~3.8GB 라 실질적으로 못 쓴다.
+        let mut d = usb_disk(2);
+        d.size_bytes = 4 * 1000 * 1000 * 1000;
+        assert_eq!(
+            availability(&d, &none()),
+            Availability::Disabled(Rejection::BelowMinimumCapacity {
+                have: 4_000_000_000,
+                minimum: MIN_USB_BYTES
+            })
+        );
+        assert!(availability(&d, &none()).is_visible());
+    }
+
+    #[test]
+    fn eight_gb_disk_is_ready() {
+        let mut d = usb_disk(2);
+        d.size_bytes = MIN_USB_BYTES;
+        assert_eq!(availability(&d, &none()), Availability::Ready);
+    }
+
+    #[test]
+    fn internal_disk_is_hidden_not_disabled() {
+        let mut d = usb_disk(2);
+        d.bus_type = BusType::Nvme;
+        let a = availability(&d, &none());
+        assert!(!a.is_visible(), "내장 디스크가 목록에 보이면 안 된다");
+        assert!(matches!(a, Availability::Hidden(_)));
+    }
+
+    #[test]
+    fn undersized_disk_cannot_be_written() {
+        let mut d = usb_disk(2);
+        d.size_bytes = 4 * 1000 * 1000 * 1000;
+        assert!(can_write(&d, &none(), 1024, None).is_err());
+    }
+
+    #[test]
+    fn read_only_disk_cannot_be_written() {
+        let mut d = usb_disk(2);
+        d.is_read_only = true;
+        assert_eq!(can_write(&d, &none(), 1024, None), Err(Rejection::ReadOnly));
+    }
+
+    #[test]
+    fn missing_negative_evidence_does_not_hide_the_disk() {
+        // BootFromDisk 등은 ESP 가 여러 개인 시스템에서 어떤 디스크에도 설정되지 않는다.
+        // 그런 경우 "값 없음"을 배제 근거로 쓰면 목록이 통째로 비어버린다.
+        // 이 모델에서는 bool 이므로 열거 계층이 null 을 false 로 매핑하면 되고,
+        // false 는 배제 사유가 아니어야 한다.
+        let d = usb_disk(2); // 모든 플래그 false
+        assert_eq!(availability(&d, &none()), Availability::Ready);
     }
 
     #[test]
