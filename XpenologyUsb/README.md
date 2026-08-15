@@ -6,7 +6,13 @@ Xpenology(헤놀로지)를 **베어메탈로 설치**할 때 쓰는 부팅 USB�
 
 ## 상태
 
-개발 중. 아직 릴리스된 바이너리가 없다.
+**구현은 끝났고, 실물 검증이 남았다.**
+
+로직은 전부 테스트되고 Windows 타겟으로 컴파일되지만, 실제 USB에 써본 적은 없다.
+CI 러너에는 USB가 없어서 그 부분은 원리적으로 자동 검증이 불가능하다
+([`docs/MANUAL_TEST.md`](docs/MANUAL_TEST.md) 참고).
+
+아직 릴리스된 바이너리가 없다.
 
 ## 하는 일
 
@@ -49,13 +55,22 @@ Xpenology(헤놀로지)를 **베어메탈로 설치**할 때 쓰는 부팅 USB�
 ```bash
 npm install
 
-# 단위 테스트 (어느 OS에서든 실행된다)
-cd src-tauri && cargo test
+# CI 가 하는 검사를 그대로 실행한다. 푸시 전에 이것을 돌릴 것.
+./check.sh
 
-# 개발 실행
+# 개발 실행 (Windows 가 아니면 가짜 장치로 뜬다)
 npm run tauri dev
 
-# 윈도우 빌드는 CI(windows-latest)에서 수행한다
+# 윈도우 배포물은 CI(windows-latest)에서만 만들어진다
+```
+
+`check.sh` 가 `cargo clippy` 만 돌리지 않는 이유가 있다. `#[cfg(windows)]` 로 감싼
+코드는 리눅스에서 아예 컴파일되지 않아 검사에서 빠진다. 실제로 그 때문에 로컬이
+초록불인 채로 CI 가 세 번 연속 실패했다. 그래서 Windows 타겟도 함께 검사한다:
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+sudo apt-get install gcc-mingw-w64-x86-64
 ```
 
 ### 구조
