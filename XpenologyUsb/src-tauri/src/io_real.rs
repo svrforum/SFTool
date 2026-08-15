@@ -21,9 +21,16 @@ impl RealIo {
     pub fn new() -> Result<Self, String> {
         let client = reqwest::blocking::Client::builder()
             .user_agent(USER_AGENT)
-            // 이미지가 3GB 대라 전체 타임아웃을 걸면 느린 회선에서 끊긴다.
-            // 연결 단계에만 제한을 둔다.
             .connect_timeout(Duration::from_secs(20))
+            // **전체 타임아웃을 명시적으로 끈다.**
+            //
+            // reqwest 의 블로킹 클라이언트는 기본 30초 타임아웃을 갖고 있고,
+            // `connect_timeout` 을 설정해도 그것은 지워지지 않는다. 게다가 그
+            // 제한은 읽기 호출마다 적용돼서, 600MB~1.3GB 를 받는 도중 Wi-Fi 가
+            // 잠깐 끊기거나 절전에서 깨어나는 것만으로 전송이 통째로 버려졌다.
+            // 앞서 이 자리에 "연결 단계에만 제한을 둔다"고 적어뒀는데 사실이
+            // 아니었다.
+            .timeout(None)
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self { client })
@@ -58,39 +65,106 @@ impl Io for RealIo {
         res.json::<Vec<Release>>().map_err(|e| e.to_string())
     }
 
+    /// 이미지를 내려받는다.
+    ///
+    /// 끊기면 **받은 지점부터 이어받는다.** 예전에는 한 번의 연결로 끝까지 받지
+    /// 못하면 이미 받은 것을 통째로 버리고 처음부터 다시 받았다. 1.3GB 를
+    /// 95% 까지 받은 뒤 잠깐 끊기는 것으로 전부 날아갔다.
     fn download(
         &self,
         url: &str,
         on_progress: &mut dyn FnMut(u64, Option<u64>),
+        should_stop: &dyn Fn() -> bool,
     ) -> Result<Vec<u8>, String> {
-        let mut res = self.client.get(url).send().map_err(|e| e.to_string())?;
-        if !res.status().is_success() {
-            return Err(format!("내려받기에 실패했습니다 ({})", res.status()));
-        }
+        const MAX_ATTEMPTS: u32 = 5;
 
-        // Content-Length 가 없을 수 있다. 그 경우 진행률은 불확정으로 표시된다.
-        let total = res.content_length();
-        let mut out = Vec::with_capacity(total.unwrap_or(0) as usize);
-        let mut buf = vec![0u8; 256 * 1024];
-        let mut done = 0u64;
+        let mut out: Vec<u8> = Vec::new();
+        let mut total: Option<u64> = None;
+        let mut last_err = String::new();
 
-        loop {
-            let n = res.read(&mut buf).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
+        for attempt in 0..MAX_ATTEMPTS {
+            if should_stop() {
+                return Err("취소됨".into());
             }
-            out.extend_from_slice(&buf[..n]);
-            done += n as u64;
-            on_progress(done, total);
+            let mut req = self.client.get(url);
+            if !out.is_empty() {
+                // 이미 받은 만큼은 건너뛴다.
+                req = req.header("Range", format!("bytes={}-", out.len()));
+            }
+
+            let mut res = match req.send() {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = e.to_string();
+                    continue;
+                }
+            };
+
+            let status = res.status().as_u16();
+            if status == 200 && !out.is_empty() {
+                // 서버가 이어받기를 무시하고 처음부터 보낸다. 받은 것을 버리고
+                // 새로 채운다 — 이어 붙이면 파일이 망가진다.
+                out.clear();
+            } else if status != 200 && status != 206 {
+                return Err(format!("내려받기에 실패했습니다 (HTTP {status})"));
+            }
+
+            // 전체 크기. 이어받는 중이면 남은 양만 알려주므로 이미 받은 만큼을 더한다.
+            if total.is_none() {
+                total = res.content_length().map(|c| c + out.len() as u64);
+            }
+
+            let mut buf = vec![0u8; 256 * 1024];
+            let mut stalled = false;
+            loop {
+                match res.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        out.extend_from_slice(&buf[..n]);
+                        on_progress(out.len() as u64, total);
+                        // 청크마다 확인한다. 256KB 단위라 취소가 즉시 반응한다.
+                        if should_stop() {
+                            return Err("취소됨".into());
+                        }
+                    }
+                    Err(e) => {
+                        last_err = e.to_string();
+                        stalled = true;
+                        break;
+                    }
+                }
+            }
+
+            if !stalled {
+                // 전체 크기를 알고 있는데 모자라면 아직 안 끝난 것이다.
+                match total {
+                    Some(t) if (out.len() as u64) < t => {
+                        last_err = format!("연결이 끊겼습니다 ({}/{} 바이트)", out.len(), t);
+                    }
+                    _ => return Ok(out),
+                }
+            }
+
+            if attempt + 1 < MAX_ATTEMPTS {
+                std::thread::sleep(Duration::from_secs(2));
+            }
         }
-        Ok(out)
+
+        Err(format!(
+            "내려받기를 {MAX_ATTEMPTS}회 시도했지만 완료하지 못했습니다: {last_err}"
+        ))
     }
 
     fn open_decompressed(&self, data: Vec<u8>, name: &str) -> Result<Box<dyn Read + Send>, String> {
         let lower = name.to_ascii_lowercase();
 
         if lower.ends_with(".gz") {
-            return Ok(Box::new(flate2::read::GzDecoder::new(
+            // MultiGzDecoder 를 쓴다. GzDecoder 는 **첫 번째 gzip 멤버에서 멈추고
+            // EOF 를 보고한다.** 여러 멤버로 이어붙인 파일이면 이미지가 조용히
+            // 잘리는데, 검증은 "쓴 것과 장치에 있는 것"만 비교하므로 잘린 채로도
+            // 통과한다. 그러면 부팅되지 않는 USB 를 받아들고 원인을 가리킬
+            // 단서가 하나도 남지 않는다.
+            return Ok(Box::new(flate2::read::MultiGzDecoder::new(
                 std::io::Cursor::new(data),
             )));
         }

@@ -5476,7 +5476,7 @@ dependencies = [
 
 [[package]]
 name = "xpenologyusb"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "flate2",
  "futures-util",

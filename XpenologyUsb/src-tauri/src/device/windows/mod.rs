@@ -100,7 +100,10 @@ impl UsbEnumerator for WindowsEnumerator {
                 is_boot: false,
                 boot_from_disk: false,
                 is_clustered: false,
-                is_read_only: desc.read_only,
+                // 장치에 직접 묻는다. 예전에는 서술자에 없는 값을
+                // 리터럴 false 로 적어 넣어서, 쓰기 금지 판정이 한 번도
+                // 동작하지 않았다.
+                is_read_only: ioctl::is_write_protected(&handle),
                 serial: desc.serial.clone(),
                 volumes: mine,
             });

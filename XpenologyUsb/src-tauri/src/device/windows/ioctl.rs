@@ -17,9 +17,8 @@ use windows::Win32::Storage::FileSystem::{
     CreateFileW, DefineDosDeviceW, DeleteVolumeMountPointW, FindFirstVolumeW, FindNextVolumeW,
     FindVolumeClose, FlushFileBuffers, GetVolumeInformationW, GetVolumePathNamesForVolumeNameW,
     ReadFile, SetFilePointerEx, WriteFile, DDD_REMOVE_DEFINITION, FILE_ATTRIBUTE_NORMAL,
-    FILE_BEGIN, FILE_FLAG_NO_BUFFERING, FILE_FLAG_WRITE_THROUGH, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
-    OPEN_EXISTING, STORAGE_BUS_TYPE,
+    FILE_BEGIN, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, OPEN_EXISTING, STORAGE_BUS_TYPE,
 };
 use windows::Win32::System::Ioctl::{
     PropertyStandardQuery, StorageDeviceProperty, CREATE_DISK, DISK_GEOMETRY_EX,
@@ -118,7 +117,7 @@ fn explain(code: i32) -> &'static str {
 /// `FILE_ANY_ACCESS` 인 기하 정보에서 얻는다.
 pub fn open_physical_drive_for_query(number: u32) -> Result<OwnedHandle, DeviceError> {
     let path = wide(&format!(r"\\.\PhysicalDrive{number}"));
-    for access in [FILE_GENERIC_READ.0, 0] {
+    for access in [GENERIC_R, 0] {
         // 안전성: path 는 널 종료된 UTF-16 이고 호출 동안 살아 있다.
         let r = unsafe {
             CreateFileW(
@@ -140,10 +139,46 @@ pub fn open_physical_drive_for_query(number: u32) -> Result<OwnedHandle, DeviceE
     Err(last_error_in("물리 디스크 열기(조회)"))
 }
 
+/// 쓰기용으로 열 때 시도하는 조합.
+///
+/// 첫 번째가 이상적이고, 뒤로 갈수록 요구를 낮춘다. 실패하면 다음을 시도하되
+/// **어떤 조합이 어떤 오류로 실패했는지 전부 기록**한다. 한 조합만 시도하고
+/// "Win32 오류 87" 만 남기면 다음에 무엇을 바꿔야 하는지 알 수 없다.
+const WRITE_OPEN_ATTEMPTS: &[(&str, u32, u32)] = &[
+    // 이상적: 캐시 우회 + 즉시 기록.
+    (
+        "GENERIC_READ|WRITE + NO_BUFFERING|WRITE_THROUGH",
+        GENERIC_RW,
+        FLAG_NO_BUF | FLAG_WT,
+    ),
+    // WRITE_THROUGH 를 뺀다. 일부 장치가 이 조합을 거부한다.
+    ("GENERIC_READ|WRITE + NO_BUFFERING", GENERIC_RW, FLAG_NO_BUF),
+    // 캐시 우회를 포기한다. 정렬 요구가 사라지지만 쓰기는 된다.
+    ("GENERIC_READ|WRITE + WRITE_THROUGH", GENERIC_RW, FLAG_WT),
+    // 가장 단순한 형태.
+    ("GENERIC_READ|WRITE (버퍼드)", GENERIC_RW, FLAG_NORMAL),
+    // 읽기 권한까지 거부되는 경우.
+    ("GENERIC_WRITE + NO_BUFFERING", GENERIC_W, FLAG_NO_BUF),
+];
+
+const GENERIC_R: u32 = 0x8000_0000;
+const GENERIC_RW: u32 = 0x8000_0000 | 0x4000_0000;
+const GENERIC_W: u32 = 0x4000_0000;
+const FLAG_NO_BUF: u32 = 0x2000_0000; // FILE_FLAG_NO_BUFFERING
+const FLAG_WT: u32 = 0x8000_0000; // FILE_FLAG_WRITE_THROUGH
+const FLAG_NORMAL: u32 = 0x0000_0080; // FILE_ATTRIBUTE_NORMAL
+
 /// 읽기/쓰기용으로 물리 디스크를 연다. 관리자 권한이 필요하다.
 ///
-/// `FILE_FLAG_NO_BUFFERING` 을 주는 이유는 캐시를 우회해 섹터 단위로 직접
-/// 쓰기 위해서다. 이 플래그가 정렬 규칙을 강제하는 근원이기도 하다.
+/// **`GENERIC_READ`/`GENERIC_WRITE` 를 쓴다.** `FILE_GENERIC_READ`/`FILE_GENERIC_WRITE`
+/// 를 쓰면 안 된다 — 그 마스크에는 `FILE_READ_EA`, `FILE_WRITE_EA`,
+/// `FILE_APPEND_DATA` 처럼 **파일에만 있는 권한**이 들어 있는데,
+/// `\\.\PhysicalDriveN` 은 파일이 아니라 장치 객체라서 그것들을 구현하지 않는다.
+/// 없는 권한을 요구하면 `ERROR_INVALID_PARAMETER(87)` 로 거부된다.
+/// 0.1.3 이 쓰기 단계에서 87 로 실패한 원인이 이것이었다.
+///
+/// `FILE_FLAG_NO_BUFFERING` 은 캐시를 우회해 섹터 단위로 직접 쓰기 위한 것이고,
+/// 정렬 요구도 여기서 나온다. 장치가 거부하면 단계적으로 완화한다.
 pub fn open_physical_drive_for_write(
     number: u32,
     share_write: bool,
@@ -154,23 +189,46 @@ pub fn open_physical_drive_for_write(
     } else {
         FILE_SHARE_READ
     };
-    // 안전성: 위와 동일.
-    let h = unsafe {
-        CreateFileW(
-            PCWSTR(path.as_ptr()),
-            (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-            share,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
-            None,
-        )
+
+    let mut tried: Vec<String> = Vec::new();
+    for (label, access, flags) in WRITE_OPEN_ATTEMPTS {
+        // 안전성: path 는 널 종료된 UTF-16 이고 호출 동안 살아 있다.
+        let r = unsafe {
+            CreateFileW(
+                PCWSTR(path.as_ptr()),
+                *access,
+                share,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(*flags),
+                None,
+            )
+        };
+        match r {
+            Ok(h) if h != INVALID_HANDLE_VALUE => return Ok(OwnedHandle(h)),
+            _ => {
+                // 안전성: GetLastError 는 스레드 로컬 값을 읽기만 한다.
+                let code = unsafe { GetLastError() }.0 as i32;
+                // 공유 위반과 접근 거부는 조합 문제가 아니라 타이밍/권한 문제다.
+                // 상위의 재시도 로직이 다루도록 그대로 올린다.
+                if code == 32 {
+                    return Err(DeviceError::Locked);
+                }
+                if code == 5 {
+                    return Err(DeviceError::WriteDenied);
+                }
+                tried.push(format!("{label} → {code}{}", explain(code)));
+            }
+        }
     }
-    .map_err(|_| last_error_in("물리 디스크 열기(쓰기)"))?;
-    if h == INVALID_HANDLE_VALUE {
-        return Err(last_error_in("물리 디스크 열기(쓰기)"));
-    }
-    Ok(OwnedHandle(h))
+
+    Err(DeviceError::Io {
+        code: 0,
+        message: format!(
+            "물리 디스크 열기(쓰기) 실패. 시도한 조합:\n{}",
+            tried.join("\n")
+        ),
+    })
 }
 
 /// 볼륨을 연다. 경로 끝의 역슬래시는 반드시 빼야 한다 —
@@ -181,7 +239,7 @@ pub fn open_volume(guid_path_no_trailing: &str) -> Result<OwnedHandle, DeviceErr
     let h = unsafe {
         CreateFileW(
             PCWSTR(path.as_ptr()),
-            (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+            GENERIC_RW,
             // 볼륨을 열 때 FILE_SHARE_WRITE 는 문서상 필수다.
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
@@ -203,7 +261,6 @@ pub struct DeviceDescriptor {
     pub vendor: Option<String>,
     pub product: Option<String>,
     pub serial: Option<String>,
-    pub read_only: bool,
 }
 
 impl DeviceDescriptor {
@@ -283,8 +340,41 @@ pub fn query_device_descriptor(h: &OwnedHandle) -> Result<DeviceDescriptor, Devi
         vendor: descriptor_string(&buf, desc.VendorIdOffset),
         product: descriptor_string(&buf, desc.ProductIdOffset),
         serial: descriptor_string(&buf, desc.SerialNumberOffset),
-        read_only: false,
     })
+}
+
+/// 커널이 보고하는 이 핸들의 디스크 번호.
+///
+/// 신원 확인이 의미를 가지려면 번호를 **장치에서 읽어야** 한다. 예전에는
+/// 사용자가 고른 번호를 그대로 복사해 넣고 비교해서, 번호 비교가 항상
+/// 참인 동어반복이었다. 디스크 번호는 재사용되므로 이 확인이 핵심이다.
+pub fn query_device_number(h: &OwnedHandle) -> Result<u32, DeviceError> {
+    // IOCTL_STORAGE_GET_DEVICE_NUMBER, FILE_ANY_ACCESS 라 권한 0 핸들에서도 된다.
+    const IOCTL_STORAGE_GET_DEVICE_NUMBER: u32 = 0x002D_1080;
+    #[repr(C)]
+    #[derive(Default)]
+    struct StorageDeviceNumber {
+        device_type: u32,
+        device_number: u32,
+        partition_number: i32,
+    }
+    let mut info = StorageDeviceNumber::default();
+    let mut returned = 0u32;
+    // 안전성: info 는 이 스코프에 살아 있고 크기를 정확히 넘긴다.
+    unsafe {
+        DeviceIoControl(
+            h.raw(),
+            IOCTL_STORAGE_GET_DEVICE_NUMBER,
+            None,
+            0,
+            Some(&mut info as *mut _ as *mut _),
+            std::mem::size_of::<StorageDeviceNumber>() as u32,
+            Some(&mut returned),
+            None,
+        )
+    }
+    .map_err(|_| last_error_in("디스크 번호 조회"))?;
+    Ok(info.device_number)
 }
 
 /// 장치의 정확한 바이트 크기.
@@ -612,7 +702,9 @@ impl AlignedBuf {
         let align = align.max(std::mem::align_of::<u8>()).next_power_of_two();
         let layout = std::alloc::Layout::from_size_align(len, align).expect("잘못된 버퍼 레이아웃");
         // 안전성: len > 0 이고 layout 이 유효하다. 실패하면 아래에서 중단한다.
-        let ptr = unsafe { std::alloc::alloc(layout) };
+        // alloc_zeroed 를 쓴다. as_mut_slice 가 초기화되지 않은 메모리에
+        // &mut [u8] 을 내주지 않게 하기 위해서다.
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -626,6 +718,15 @@ impl AlignedBuf {
 
     pub fn as_ptr(&self) -> *const u8 {
         self.ptr
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.ptr
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        // 안전성: ptr 은 len 바이트의 유효한 할당이고 이 타입이 소유한다.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 
     pub fn len(&self) -> usize {
@@ -680,12 +781,34 @@ pub fn write_raw(
     Ok(())
 }
 
-/// 슬라이스를 그대로 쓴다. 정렬은 호출부가 보장한다.
-pub fn write_at(h: &OwnedHandle, offset: u64, data: &[u8]) -> Result<(), DeviceError> {
-    write_raw(h, offset, data.as_ptr(), data.len())
+/// 정렬된 버퍼로 직접 읽는다.
+///
+/// # Safety
+/// `ptr` 은 최소 `len` 바이트를 담을 수 있는 유효한 쓰기 가능 메모리여야 한다.
+pub fn read_into(
+    h: &OwnedHandle,
+    offset: u64,
+    ptr: *mut u8,
+    len: usize,
+) -> Result<(), DeviceError> {
+    seek(h, offset)?;
+    let mut read = 0u32;
+    // 안전성: 호출부가 ptr 이 len 바이트를 담을 수 있음을 보장한다.
+    let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+    // 안전성: slice 는 호출 동안 살아 있다.
+    unsafe { ReadFile(h.raw(), Some(slice), Some(&mut read), None) }
+        .map_err(|_| last_error_in("장치 읽기"))?;
+    if read as usize != len {
+        return Err(DeviceError::Io {
+            code: 0,
+            message: format!("짧은 읽기: {read} / {len} 바이트"),
+        });
+    }
+    Ok(())
 }
 
 /// 지정 위치에서 읽는다.
+#[allow(dead_code)]
 pub fn read_at(h: &OwnedHandle, offset: u64, buf: &mut [u8]) -> Result<(), DeviceError> {
     seek(h, offset)?;
     let mut read = 0u32;
@@ -711,44 +834,78 @@ pub fn flush(h: &OwnedHandle) -> Result<(), DeviceError> {
 // 잠금과 레이아웃
 // ---------------------------------------------------------------------------
 
-/// 인자 없는 제어 코드를 보낸다. 실패해도 무시하는 용도.
-fn control(h: &OwnedHandle, code: u32) -> bool {
+/// 인자 없는 제어 코드를 보낸다.
+///
+/// **오류 코드를 보존한다.** 예전에는 `bool` 을 돌려줬는데, 그 한 줄이 하류
+/// 전체를 오염시켰다. 잠금 재시도는 "다른 프로그램이 쓰는 중"과 "이 장치가 그
+/// IOCTL 을 지원하지 않음"을 구분하지 못해 후자에도 15초를 다 태웠고,
+/// 마운트 해제나 속성 갱신 실패는 흔적조차 남지 않았다.
+fn control(h: &OwnedHandle, code: u32, op: &str) -> Result<(), DeviceError> {
     let mut returned = 0u32;
     // 안전성: 입출력 버퍼가 없는 제어 코드다.
-    unsafe { DeviceIoControl(h.raw(), code, None, 0, None, 0, Some(&mut returned), None).is_ok() }
+    unsafe { DeviceIoControl(h.raw(), code, None, 0, None, 0, Some(&mut returned), None) }
+        .map_err(|_| last_error_in(op))
 }
 
 /// 경계 검사를 끈다. 볼륨 끝 섹터에 접근하려면 필요하다.
-pub fn allow_extended_dasd_io(h: &OwnedHandle) -> bool {
-    control(h, FSCTL_ALLOW_EXTENDED_DASD_IO)
+pub fn allow_extended_dasd_io(h: &OwnedHandle) -> Result<(), DeviceError> {
+    control(h, FSCTL_ALLOW_EXTENDED_DASD_IO, "경계 검사 해제")
+}
+
+/// 이 장치가 쓰기 금지 상태인가.
+///
+/// `STORAGE_DEVICE_DESCRIPTOR` 에는 쓰기 금지 여부가 없어서, 예전에는
+/// `read_only: false` 라고 **적어 넣었다.** 조회한 것처럼 보이지만 리터럴이었고,
+/// 그래서 쓰기 금지 판정이 실제로는 한 번도 동작하지 않았다.
+///
+/// `IOCTL_DISK_IS_WRITABLE` 은 `FILE_ANY_ACCESS` 라 권한 0 핸들에서도 물을 수 있다.
+/// 성공하면 쓸 수 있고, `ERROR_WRITE_PROTECT(19)` 면 쓰기 금지다.
+/// **그 외의 오류는 "모른다"로 두고 쓸 수 있는 쪽으로 간다** — 판정 실패를
+/// 금지로 바꾸면 모든 디스크를 감춰버렸던 실수를 반대 방향으로 되풀이하게 된다.
+pub fn is_write_protected(h: &OwnedHandle) -> bool {
+    const IOCTL_DISK_IS_WRITABLE: u32 = 0x0007_0024;
+    match control(h, IOCTL_DISK_IS_WRITABLE, "쓰기 가능 여부 조회") {
+        Ok(()) => false,
+        Err(DeviceError::Io { code: 19, .. }) => true,
+        Err(_) => false,
+    }
 }
 
 /// 볼륨을 잠근다. 열린 파일이 있으면 실패하므로 재시도한다.
+///
+/// **재시도할 값어치가 있는 오류에만 재시도한다.** 공유 위반은 시간이 지나면
+/// 풀릴 수 있지만 "지원하지 않는 요청" 은 15초를 기다려도 달라지지 않는다.
 pub fn lock_volume_with_retry(
     h: &OwnedHandle,
     retries: u32,
     interval: std::time::Duration,
 ) -> Result<(), DeviceError> {
+    let mut last = DeviceError::Locked;
     for _ in 0..retries {
-        if control(h, FSCTL_LOCK_VOLUME) {
-            return Ok(());
+        match control(h, FSCTL_LOCK_VOLUME, "볼륨 잠금") {
+            Ok(()) => return Ok(()),
+            Err(e @ (DeviceError::Locked | DeviceError::WriteDenied)) => {
+                last = e;
+                std::thread::sleep(interval);
+            }
+            Err(DeviceError::Io { code: 32, .. }) => std::thread::sleep(interval),
+            Err(e) => return Err(e),
         }
-        std::thread::sleep(interval);
     }
-    Err(DeviceError::Locked)
+    Err(last)
 }
 
-pub fn dismount_volume(h: &OwnedHandle) -> bool {
-    control(h, FSCTL_DISMOUNT_VOLUME)
+pub fn dismount_volume(h: &OwnedHandle) -> Result<(), DeviceError> {
+    control(h, FSCTL_DISMOUNT_VOLUME, "볼륨 마운트 해제")
 }
 
-pub fn unlock_volume(h: &OwnedHandle) -> bool {
-    control(h, FSCTL_UNLOCK_VOLUME)
+pub fn unlock_volume(h: &OwnedHandle) -> Result<(), DeviceError> {
+    control(h, FSCTL_UNLOCK_VOLUME, "볼륨 잠금 해제")
 }
 
 /// 파티션 테이블을 재인식시킨다.
-pub fn update_properties(h: &OwnedHandle) -> bool {
-    control(h, IOCTL_DISK_UPDATE_PROPERTIES)
+pub fn update_properties(h: &OwnedHandle) -> Result<(), DeviceError> {
+    control(h, IOCTL_DISK_UPDATE_PROPERTIES, "파티션 테이블 재인식")
 }
 
 pub fn allow_media_removal(h: &OwnedHandle) -> bool {
@@ -772,8 +929,8 @@ pub fn allow_media_removal(h: &OwnedHandle) -> bool {
     }
 }
 
-pub fn eject_media(h: &OwnedHandle) -> bool {
-    control(h, IOCTL_STORAGE_EJECT_MEDIA)
+pub fn eject_media(h: &OwnedHandle) -> Result<(), DeviceError> {
+    control(h, IOCTL_STORAGE_EJECT_MEDIA, "미디어 꺼내기")
 }
 
 /// 디스크를 RAW 로 초기화한다.

@@ -59,13 +59,18 @@ pub trait Io {
     /// 릴리스 목록을 가져온다.
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>, String>;
 
-    /// 이미지를 내려받아 임시 경로에 둔다.
+    /// 이미지를 내려받는다.
     ///
     /// 진행 콜백은 (누적 바이트, 전체 바이트) 를 받는다.
+    ///
+    /// `should_stop` 이 참을 돌려주면 즉시 중단해야 한다. 이 인자가 없던 시절에는
+    /// 취소가 **내려받기 전체가 끝난 뒤에야** 확인돼서, 1.3GB 를 받는 도중
+    /// 취소를 눌러도 30분을 기다려야 했다. 사용자는 그냥 강제 종료한다.
     fn download(
         &self,
         url: &str,
         on_progress: &mut dyn FnMut(u64, Option<u64>),
+        should_stop: &dyn Fn() -> bool,
     ) -> Result<Vec<u8>, String>;
 
     /// 압축을 푼 스트림을 연다.
@@ -130,14 +135,24 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
     let mut last = std::time::Instant::now();
     let mut prev_done = 0u64;
     let compressed = io
-        .download(&image.download_url, &mut |done, total| {
-            let now = std::time::Instant::now();
-            let dt = now.duration_since(last).as_secs_f64();
-            rep.update(done, total, dt, done.saturating_sub(prev_done));
-            last = now;
-            prev_done = done;
-        })
-        .map_err(RunError::Download)?;
+        .download(
+            &image.download_url,
+            &mut |done, total| {
+                let now = std::time::Instant::now();
+                let dt = now.duration_since(last).as_secs_f64();
+                rep.update(done, total, dt, done.saturating_sub(prev_done));
+                last = now;
+                prev_done = done;
+            },
+            &|| cancel.is_canceled(),
+        )
+        .map_err(|e| {
+            if cancel.is_canceled() {
+                RunError::Canceled
+            } else {
+                RunError::Download(e)
+            }
+        })?;
 
     if cancel.is_canceled() {
         return Err(RunError::Canceled);
@@ -306,6 +321,7 @@ mod tests {
             &self,
             _url: &str,
             on_progress: &mut dyn FnMut(u64, Option<u64>),
+            _should_stop: &dyn Fn() -> bool,
         ) -> Result<Vec<u8>, String> {
             let total = self.payload.len() as u64;
             on_progress(total / 2, Some(total));
