@@ -65,7 +65,13 @@ fn wide(s: &str) -> Vec<u16> {
     OsString::from(s).encode_wide().chain(Some(0)).collect()
 }
 
-fn last_error() -> DeviceError {
+/// 마지막 Win32 오류를, **어느 작업에서 났는지와 함께** 담는다.
+///
+/// 앞서 이 함수는 작업 이름 없이 "Win32 오류 87" 만 남겼다. 그 문구로는
+/// 열기가 실패한 것인지, 레이아웃 초기화인지, 쓰기인지 알 수 없어서
+/// 사용자가 보고해도 원인을 좁힐 수 없었다. 오류가 어디서 났는지 모르면
+/// 오류를 보고받는 의미가 없다.
+fn last_error_in(op: &str) -> DeviceError {
     // 안전성: GetLastError 는 스레드 로컬 값을 읽기만 한다.
     let code = unsafe { GetLastError() }.0 as i32;
     match code {
@@ -74,8 +80,25 @@ fn last_error() -> DeviceError {
         1110 => DeviceError::MediaChanged, // ERROR_MEDIA_CHANGED
         _ => DeviceError::Io {
             code,
-            message: format!("Win32 오류 {code}"),
+            message: format!("{op} 실패: Win32 오류 {code}{}", explain(code)),
         },
+    }
+}
+
+/// 자주 나오는 오류 코드에 짧은 설명을 붙인다.
+///
+/// 숫자만 있으면 사용자는 검색밖에 할 수 없다.
+fn explain(code: i32) -> &'static str {
+    match code {
+        1 => " (지원되지 않는 요청)",
+        6 => " (잘못된 핸들)",
+        19 => " (쓰기 금지된 매체)",
+        21 => " (장치가 준비되지 않음)",
+        87 => " (잘못된 매개변수 — 대개 섹터 정렬이나 구조체 크기 문제)",
+        112 => " (공간 부족)",
+        433 => " (장치를 찾을 수 없음)",
+        1117 => " (입출력 장치 오류)",
+        _ => "",
     }
 }
 
@@ -114,7 +137,7 @@ pub fn open_physical_drive_for_query(number: u32) -> Result<OwnedHandle, DeviceE
             }
         }
     }
-    Err(last_error())
+    Err(last_error_in("물리 디스크 열기(조회)"))
 }
 
 /// 읽기/쓰기용으로 물리 디스크를 연다. 관리자 권한이 필요하다.
@@ -143,9 +166,9 @@ pub fn open_physical_drive_for_write(
             None,
         )
     }
-    .map_err(|_| last_error())?;
+    .map_err(|_| last_error_in("물리 디스크 열기(쓰기)"))?;
     if h == INVALID_HANDLE_VALUE {
-        return Err(last_error());
+        return Err(last_error_in("물리 디스크 열기(쓰기)"));
     }
     Ok(OwnedHandle(h))
 }
@@ -167,9 +190,9 @@ pub fn open_volume(guid_path_no_trailing: &str) -> Result<OwnedHandle, DeviceErr
             None,
         )
     }
-    .map_err(|_| last_error())?;
+    .map_err(|_| last_error_in("볼륨 열기"))?;
     if h == INVALID_HANDLE_VALUE {
-        return Err(last_error());
+        return Err(last_error_in("볼륨 열기"));
     }
     Ok(OwnedHandle(h))
 }
@@ -243,7 +266,7 @@ pub fn query_device_descriptor(h: &OwnedHandle) -> Result<DeviceDescriptor, Devi
             None,
         )
     };
-    ok.map_err(|_| last_error())?;
+    ok.map_err(|_| last_error_in("장치 정보 조회"))?;
 
     if (returned as usize) < std::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR>() {
         return Err(DeviceError::Io {
@@ -309,7 +332,7 @@ pub fn query_length(h: &OwnedHandle) -> Result<u64, DeviceError> {
             None,
         )
     }
-    .map_err(|_| last_error())?;
+    .map_err(|_| last_error_in("장치 용량 조회"))?;
 
     if geo.DiskSize <= 0 {
         return Err(DeviceError::Io {
@@ -340,7 +363,7 @@ pub fn query_sector_size(h: &OwnedHandle) -> Result<u32, DeviceError> {
             None,
         )
     }
-    .map_err(|_| last_error())?;
+    .map_err(|_| last_error_in("섹터 크기 조회"))?;
 
     let ss = geo.Geometry.BytesPerSector;
     if ss < 512 || !ss.is_power_of_two() {
@@ -370,7 +393,7 @@ pub fn volume_disk_numbers(h: &OwnedHandle) -> Result<Vec<(u32, u32)>, DeviceErr
             None,
         )
     }
-    .map_err(|_| last_error())?;
+    .map_err(|_| last_error_in("볼륨-디스크 매핑 조회"))?;
 
     // 안전성: 위 호출이 성공했으므로 버퍼 앞부분은 유효한 구조체다.
     let ext = unsafe { &*(buf.as_ptr() as *const VOLUME_DISK_EXTENTS) };
@@ -460,9 +483,9 @@ fn open_volume_for_query(device_path: &str) -> Result<OwnedHandle, DeviceError> 
             None,
         )
     }
-    .map_err(|_| last_error())?;
+    .map_err(|_| last_error_in("볼륨 열기(조회)"))?;
     if h == INVALID_HANDLE_VALUE {
-        return Err(last_error());
+        return Err(last_error_in("볼륨 열기(조회)"));
     }
     Ok(OwnedHandle(h))
 }
@@ -622,7 +645,7 @@ fn seek(h: &OwnedHandle, offset: u64) -> Result<(), DeviceError> {
     let mut new = 0i64;
     // 안전성: new 는 이 스코프에 살아 있다.
     unsafe { SetFilePointerEx(h.raw(), offset as i64, Some(&mut new), FILE_BEGIN) }
-        .map_err(|_| last_error())
+        .map_err(|_| last_error_in("파일 위치 이동"))
 }
 
 /// 지정 위치에 쓴다.
@@ -646,7 +669,7 @@ pub fn write_raw(
             None,
         )
     }
-    .map_err(|_| last_error())?;
+    .map_err(|_| last_error_in("장치 쓰기"))?;
 
     if written as usize != len {
         return Err(DeviceError::Io {
@@ -667,7 +690,8 @@ pub fn read_at(h: &OwnedHandle, offset: u64, buf: &mut [u8]) -> Result<(), Devic
     seek(h, offset)?;
     let mut read = 0u32;
     // 안전성: buf 는 호출 동안 살아 있고 크기를 정확히 넘긴다.
-    unsafe { ReadFile(h.raw(), Some(buf), Some(&mut read), None) }.map_err(|_| last_error())?;
+    unsafe { ReadFile(h.raw(), Some(buf), Some(&mut read), None) }
+        .map_err(|_| last_error_in("장치 읽기"))?;
     if read as usize != buf.len() {
         return Err(DeviceError::Io {
             code: 0,
@@ -680,7 +704,7 @@ pub fn read_at(h: &OwnedHandle, offset: u64, buf: &mut [u8]) -> Result<(), Devic
 /// 캐시를 장치까지 내린다.
 pub fn flush(h: &OwnedHandle) -> Result<(), DeviceError> {
     // 안전성: 유효한 핸들이다.
-    unsafe { FlushFileBuffers(h.raw()) }.map_err(|_| last_error())
+    unsafe { FlushFileBuffers(h.raw()) }.map_err(|_| last_error_in("캐시 플러시"))
 }
 
 // ---------------------------------------------------------------------------
@@ -775,7 +799,7 @@ pub fn create_disk_raw(h: &OwnedHandle) -> Result<(), DeviceError> {
             None,
         )
     }
-    .map_err(|_| last_error())
+    .map_err(|_| last_error_in("파티션 테이블 초기화(RAW)"))
 }
 
 /// 드라이브 문자를 뗀다.

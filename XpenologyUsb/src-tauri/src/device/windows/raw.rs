@@ -86,7 +86,13 @@ impl RawWriter for WindowsRawWriter {
         //    GPT 백업 헤더에 아무 효과가 없다.
         {
             let prep = open_physical_with_retry(disk.number)?;
-            ioctl::create_disk_raw(&prep)?;
+            // 실패해도 중단하지 않는다. 이 단계의 목적은 옛 파티션 테이블을
+            // 치우는 것인데, 어차피 뒤에서 장치 앞부분을 통째로 덮어쓰고
+            // 꼬리까지 지운다. 정리 단계 하나가 실패했다고 작업 전체를
+            // 포기하면, 볼륨을 전부 잠그려다 실패하던 것과 같은 잘못이 된다.
+            if let Err(e) = ioctl::create_disk_raw(&prep) {
+                eprintln!("파티션 테이블 초기화를 건너뜁니다: {e:?}");
+            }
             ioctl::update_properties(&prep);
             // 여기서 핸들이 drop 되며 닫힌다. 반드시 닫아야 한다 —
             // 레이아웃 변경으로 장치가 재열거되면 이 핸들은
@@ -123,7 +129,13 @@ impl RawWriter for WindowsRawWriter {
         // 정렬된 반송 버퍼. NO_BUFFERING 핸들은 버퍼 주소가 섹터 경계에
         // 맞기를 기대하는데, Rust 의 기본 할당은 그것을 보장하지 않는다.
         // 복사 비용은 메모리 대역폭 기준이라 USB 쓰기 속도에 비하면 없는 것과 같다.
-        let bounce = ioctl::AlignedBuf::new(BOUNCE_BYTES, sector_size as usize);
+        //
+        // 논리 섹터가 아니라 최소 4096 에 맞춘다. Microsoft 문서는 **물리** 섹터
+        // 정렬을 권장하는데, 요즘 장치는 논리 512 / 물리 4096(512e)인 경우가 흔하다.
+        // 논리 크기에만 맞추면 그런 장치에서 ERROR_INVALID_PARAMETER(87) 가 날 수
+        // 있다. 4096 은 페이지 크기이기도 해서 두 경우를 모두 덮는다.
+        let align = (sector_size as usize).max(4096);
+        let bounce = ioctl::AlignedBuf::new(BOUNCE_BYTES, align);
 
         Ok(Box::new(WindowsSession {
             handle,
@@ -202,18 +214,27 @@ impl WriteSession for WindowsSession {
 
         // 정렬된 버퍼를 거쳐 쓴다. 반송 버퍼보다 큰 요청은 나눠 보내되,
         // 조각도 섹터 배수를 유지해야 하므로 버퍼 크기를 섹터로 내림해 쓴다.
-        let chunk = (self.bounce.len() / ss as usize) * ss as usize;
+        let mut chunk = (self.bounce.len() / ss as usize) * ss as usize;
         let mut written = 0usize;
         while written < data.len() {
             let n = chunk.min(data.len() - written);
             self.bounce.as_mut_slice()[..n].copy_from_slice(&data[written..written + n]);
-            ioctl::write_raw(
+            match ioctl::write_raw(
                 &self.handle,
                 offset + written as u64,
                 self.bounce.as_ptr(),
                 n,
-            )?;
-            written += n;
+            ) {
+                Ok(()) => written += n,
+                // 일부 드라이버는 한 번에 받는 전송 크기에 상한이 있고,
+                // 넘으면 ERROR_INVALID_PARAMETER 를 돌려준다. 정렬은 이미
+                // 맞춘 상태이므로 87 이 나오면 크기 문제로 보고 절반으로 줄여
+                // 다시 시도한다. 섹터 하나까지 줄여도 실패하면 진짜 오류다.
+                Err(DeviceError::Io { code: 87, .. }) if chunk > ss as usize => {
+                    chunk = ((chunk / 2) / ss as usize).max(1) * ss as usize;
+                }
+                Err(e) => return Err(e),
+            }
         }
         Ok(())
     }
