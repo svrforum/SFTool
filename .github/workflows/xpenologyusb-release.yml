@@ -107,19 +107,16 @@ jobs:
           cp "$src" "XpenologyUsb-portable.exe"
           gh release upload "$TAG" "XpenologyUsb-portable.exe" --clobber --repo "$GITHUB_REPOSITORY"
 
-      # 해시와 바이러스토탈 결과를 릴리스 노트에 넣는다.
+      # 파일 해시를 릴리스 노트에 넣는다.
       #
       # 서명되지 않은 프로그램이라 SmartScreen 경고는 어차피 뜬다. 경고를 없애지는
-      # 못하지만, 받는 사람이 "이게 내가 받은 그 파일이 맞는지" 와 "검사 결과가
-      # 어떤지" 를 스스로 확인할 수 있게 근거를 남긴다.
-      #
-      # VT_API_KEY 시크릿이 없으면 해시와 조회 링크만 넣는다. 링크는 해시 기반이라
-      # 누군가 한 번 올리면 그때부터 결과가 보인다.
-      - name: Publish hashes and VirusTotal results
+      # 못하지만, 받는 사람이 "이게 CI 에서 빌드된 그 파일이 맞는지" 를 스스로
+      # 확인할 수 있게 근거를 남긴다. 빌드 기록 링크까지 함께 넣어서 어느 커밋에서
+      # 나왔는지 추적할 수 있다.
+      - name: Publish file hashes
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VT_API_KEY: ${{ secrets.VT_API_KEY }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -128,32 +125,6 @@ jobs:
 
           sha_portable=$(sha256sum "$portable" | cut -d' ' -f1)
           sha_setup=$(sha256sum "$setup" | cut -d' ' -f1)
-
-          # 바이러스토탈 결과. 키가 없으면 조회 링크만 남긴다.
-          vt_section() {
-            local file="$1" sha="$2" label="$3"
-            echo "**$label**"
-            echo '```'
-            echo "SHA-256: $sha"
-            echo '```'
-            if [ -n "${VT_API_KEY:-}" ]; then
-              # 이미 검사된 파일이면 결과를 바로 읽는다. 없으면 올린다.
-              local stats
-              stats=$(curl -s -H "x-apikey: $VT_API_KEY" \
-                "https://www.virustotal.com/api/v3/files/$sha" \
-                | python -c "import sys,json;d=json.load(sys.stdin);s=d['data']['attributes']['last_analysis_stats'];print(f\"{s['malicious']}/{s['malicious']+s['undetected']+s['harmless']+s['suspicious']}\")" 2>/dev/null || true)
-              if [ -z "$stats" ]; then
-                curl -s -X POST -H "x-apikey: $VT_API_KEY" \
-                  -F "file=@$file" https://www.virustotal.com/api/v3/files > /dev/null || true
-                echo "바이러스토탈에 제출했습니다. 결과는 잠시 후 아래 링크에서 확인하실 수 있습니다."
-              else
-                echo "바이러스토탈 탐지: **$stats**"
-              fi
-            fi
-            echo ""
-            echo "[바이러스토탈에서 확인](https://www.virustotal.com/gui/file/$sha)"
-            echo ""
-          }
 
           {
             gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body
@@ -166,8 +137,11 @@ jobs:
             echo "받으신 파일이 여기서 빌드된 것과 같은지 아래 해시로 확인하실 수 있습니다."
             echo "윈도우에서는 \`certutil -hashfile <파일> SHA256\` 으로 확인합니다."
             echo ""
-            vt_section "$portable" "$sha_portable" "XpenologyUsb-portable.exe"
-            vt_section "$setup" "$sha_setup" "$(basename "$setup")"
+            echo "| 파일 | SHA-256 |"
+            echo "| --- | --- |"
+            echo "| \`$portable\` | \`$sha_portable\` |"
+            echo "| \`$(basename "$setup")\` | \`$sha_setup\` |"
+            echo ""
             echo "이 파일들은 GitHub Actions 에서 소스로부터 자동 빌드되었습니다."
             echo "빌드 기록: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           } > notes.md
