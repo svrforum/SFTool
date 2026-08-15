@@ -140,19 +140,72 @@ impl RawWriter for WindowsRawWriter {
                 ),
             });
         }
+        let locked_count = locked.len();
 
         // 파티션 테이블을 RAW 로. 실패해도 중단하지 않는다 — 어차피 장치
         // 앞부분을 통째로 덮어쓰고 꼬리까지 지운다.
+        //
+        // **성공 여부는 반드시 기록한다.** 성공했다면 볼륨이 사라져서 잠금이
+        // 필요 없고, 실패했다면 그것이 곧 쓰기 거부의 원인이다. `let _ =` 로
+        // 버리면 둘을 구분할 수 없고, 나중에 거부됐을 때 아무 단서도 남지 않는다.
         {
             let prep = open_physical_with_retry(disk.number)?;
-            let _ = ioctl::create_disk_raw(&prep);
-            let _ = ioctl::update_properties(&prep);
+            if let Err(e) = ioctl::create_disk_raw(&prep) {
+                lock_failures.push(format!("파티션 테이블 초기화 실패 ({e:?})"));
+            }
+            if let Err(e) = ioctl::update_properties(&prep) {
+                lock_failures.push(format!("파티션 테이블 재인식 실패 ({e:?})"));
+            }
             // 여기서 핸들이 닫힌다. 반드시 닫아야 한다 — 레이아웃 변경으로
             // 장치가 재열거되면 이 핸들은 ERROR_MEDIA_CHANGED 를 내기 시작한다.
         }
 
         // ── 3. 쓰기용 핸들 ───────────────────────────────────────────────
         let handle = open_physical_with_retry(disk.number)?;
+
+        // **물리 핸들 자체를 잠근다.**
+        //
+        // 빠져 있던 조각이다. Microsoft 의 "Restricted Direct Disk Access" 규칙에서
+        // 디스크 핸들로 쓰기가 허용되는 경우는 (1) 섹터가 어떤 볼륨에도 속하지
+        // 않거나, (2) 속한 볼륨이 **명시적으로 잠겨** 있거나, (3) 그 볼륨이
+        // 마운트돼 있지 않을 때다. 볼륨 핸들만 잠그면 (2)를 만족시키려는
+        // 시도인데, 앞 단계에서 파티션 테이블을 지우고 재인식시키는 순간
+        // 그 볼륨 핸들들은 낡은 객체를 가리키게 된다.
+        //
+        // Rufus 가 DD 쓰기에서 물리 핸들에 직접 FSCTL_LOCK_VOLUME 을 거는 이유가
+        // 이것이다. 실패해도 중단하지 않는다 — Windows 11 은 ESP 가 있는 장치에서
+        // 이 잠금을 거부하는 경우가 있고, 그때는 (1)이나 (3)으로 통과할 수 있다.
+        let mut phys_lock_note = String::new();
+        if let Err(e) = ioctl::allow_extended_dasd_io(&handle) {
+            phys_lock_note = format!("물리 핸들 경계 검사 해제 실패 ({e:?})");
+        }
+        match ioctl::lock_volume_with_retry(&handle, LOCK_RETRIES / 3, LOCK_RETRY_INTERVAL) {
+            Ok(()) => {}
+            Err(e) => {
+                phys_lock_note = format!("물리 핸들 잠금 실패 ({e:?})");
+            }
+        }
+        if !phys_lock_note.is_empty() {
+            lock_failures.push(phys_lock_note);
+        }
+
+        // 준비 단계에서 뜻대로 안 된 것들. 쓰기가 거부되면 이 목록이 원인을
+        // 짚는 유일한 단서다.
+        let prep_notes = if lock_failures.is_empty() {
+            format!(
+                "볼륨 {}/{} 잠금, 물리 핸들 잠금, 파티션 테이블 초기화 모두 성공",
+                locked_count,
+                disk.volumes.len()
+            )
+        } else {
+            format!(
+                "볼륨 {}/{} 잠금. 준비 중 발생한 문제:\n  {}",
+                locked_count,
+                disk.volumes.len(),
+                lock_failures.join("\n  ")
+            )
+        };
+
         let sector_size = ioctl::query_sector_size(&handle)?;
 
         // 정렬된 반송 버퍼. 최소 4096 에 맞춘다 — Microsoft 는 물리 섹터 정렬을
@@ -168,6 +221,7 @@ impl RawWriter for WindowsRawWriter {
             sector_size,
             disk_number: disk.number,
             bounce,
+            prep_notes,
         }))
     }
 }
@@ -204,6 +258,9 @@ pub struct WindowsSession {
     /// 정렬된 반송 버퍼. 호출부가 준 슬라이스가 정렬돼 있다는 보장이 없으므로
     /// 여기로 복사한 뒤 쓴다.
     bounce: ioctl::AlignedBuf,
+    /// 준비 단계에서 무엇이 됐고 무엇이 안 됐는지.
+    /// 쓰기가 거부됐을 때 이유를 설명하기 위해 들고 있는다.
+    prep_notes: String,
 }
 
 impl WriteSession for WindowsSession {
@@ -366,6 +423,19 @@ impl WindowsSession {
                 // 실패하면 진짜 오류다.
                 Err(DeviceError::Io { code: 87, .. }) if chunk > ss => {
                     chunk = ((chunk / 2) / ss).max(1) * ss;
+                }
+                // 쓰기가 거부되면 준비 단계 상태를 함께 올린다.
+                // 그냥 "거부됨"만 남기면 Defender 탓으로 오해하기 쉬운데,
+                // 실제로는 볼륨 잠금이나 레이아웃 초기화가 안 된 경우가 대부분이다.
+                Err(DeviceError::WriteDenied) => {
+                    return Err(DeviceError::Io {
+                        code: 5,
+                        message: format!(
+                            "장치가 쓰기를 거부했습니다 (오프셋 {}).\n{}",
+                            offset + done as u64,
+                            self.prep_notes
+                        ),
+                    })
                 }
                 Err(e) => return Err(e),
             }

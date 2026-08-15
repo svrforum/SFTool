@@ -391,7 +391,14 @@ async function startWrite() {
   render();
 }
 
-/** 백엔드 오류를 UI 가 아는 코드로 바꾼다. */
+/**
+ * 백엔드 오류를 UI 가 아는 코드로 바꾼다.
+ *
+ * 원문 메시지는 **항상 함께 보여준다.** 예전에는 코드가 매칭되면 원문을
+ * 버렸는데, 백엔드가 거기에 "볼륨 2/2 잠금, 파티션 테이블 초기화 실패" 같은
+ * 진짜 원인을 담아 보내고 있었다. 친절한 제목만 남기고 그걸 버리면
+ * 사용자도 나도 원인을 알 수 없다.
+ */
 function normalizeFailure(err: unknown): Failure {
   const s = typeof err === 'string' ? err : JSON.stringify(err);
   const map: Record<string, string> = {
@@ -401,10 +408,23 @@ function normalizeFailure(err: unknown): Failure {
     MediaChanged: 'media_changed',
     IdentityChanged: 'identity_changed',
   };
-  for (const [k, v] of Object.entries(map)) {
-    if (s.includes(k)) return { code: v };
+
+  // 백엔드가 코드 5 로 감싼 쓰기 거부. 준비 상태가 메시지에 들어 있다.
+  if (s.includes('쓰기를 거부') || s.includes('refused the write')) {
+    return { code: 'write_denied', detail: cleanDetail(s) };
   }
-  return { code: 'generic', detail: s.slice(0, 300) };
+  for (const [k, v] of Object.entries(map)) {
+    if (s.includes(k)) return { code: v, detail: cleanDetail(s) };
+  }
+  return { code: 'generic', detail: cleanDetail(s) };
+}
+
+/** Rust 디버그 표현에서 사람이 읽을 부분만 남긴다. */
+function cleanDetail(s: string): string {
+  // Device(Io { code: 5, message: "..." }) 형태에서 message 만 꺼낸다.
+  const m = s.match(/message:\s*"((?:[^"\\]|\\.)*)"/);
+  const body = m ? m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"') : s;
+  return body.slice(0, 600);
 }
 
 /** 브라우저 미리보기에서 진행 화면을 확인하기 위한 모의 실행. */

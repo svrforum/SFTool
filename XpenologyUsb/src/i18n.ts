@@ -51,8 +51,9 @@ const ko: Dict = {
   err_needs_elevation_why: '프로그램을 마우스 오른쪽 버튼으로 눌러 "관리자 권한으로 실행"을 선택해 주세요.',
   err_locked: 'USB를 잠글 수 없습니다',
   err_locked_why: '다른 프로그램이 USB를 사용 중일 수 있습니다. 탐색기 창을 닫고 다시 시도해 주세요.',
-  err_write_denied: '쓰기가 거부되었습니다',
-  err_write_denied_why: 'Windows 보안의 "제어된 폴더 액세스"가 원인일 수 있습니다. 잠시 끄고 다시 시도해 보세요.',
+  err_write_denied: '장치가 쓰기를 거부했습니다',
+  err_write_denied_why:
+    '탐색기 창이나 백신이 USB를 붙잡고 있으면 이런 일이 생깁니다. 열려 있는 창을 모두 닫고 USB를 뽑았다 다시 꽂은 뒤 시도해 주세요. 아래에 준비 단계 상태가 함께 표시됩니다.',
   err_media_changed: 'USB가 바뀌었습니다',
   err_media_changed_why: '작업 중에 USB가 분리되었거나 교체되었습니다. 다시 꽂고 처음부터 진행해 주세요.',
   err_identity_changed: '다른 장치입니다',
@@ -125,9 +126,9 @@ const en: Dict = {
   err_locked: 'The drive could not be locked',
   err_locked_why:
     'Another program may be using it. Close any Explorer windows and try again.',
-  err_write_denied: 'Writing was denied',
+  err_write_denied: 'The drive refused the write',
   err_write_denied_why:
-    'Controlled folder access in Windows Security may be blocking this. Try turning it off briefly.',
+    'This usually means something still holds the drive -- an Explorer window or antivirus. Close any windows using it, unplug and replug the drive, then try again. The preparation details are shown below.',
   err_media_changed: 'The drive changed',
   err_media_changed_why:
     'It was unplugged or swapped during the operation. Reconnect it and start over.',
