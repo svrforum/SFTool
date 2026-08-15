@@ -36,7 +36,7 @@
 
 use xpenologyusb_lib::core::model::{BusType, DiskInfo};
 use xpenologyusb_lib::device::windows::WindowsRawWriter;
-use xpenologyusb_lib::device::{RawWriter, UsbEnumerator, WriteSession};
+use xpenologyusb_lib::device::{RawWriter, UsbEnumerator};
 
 /// 대상 디스크 번호. 없으면 테스트를 건너뛴다.
 fn target_disk() -> Option<u32> {

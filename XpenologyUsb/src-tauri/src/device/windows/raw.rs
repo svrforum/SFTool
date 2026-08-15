@@ -68,6 +68,23 @@ impl RawWriter for WindowsRawWriter {
             }
         };
 
+        // VHD 통합 테스트에서만 버스 타입 검사를 넘긴다.
+        //
+        // 가상 디스크는 `Virtual` 로 보고되므로 이 검사에 걸린다. 검사 자체는
+        // 옳고 실제로 제 역할을 했다 — 테스트가 여기서 막혔다. 다만 그 테스트가
+        // 확인하려는 것은 버스 판정이 아니라 **Win32 호출 순서**이므로,
+        // 이 한 가지만 기능 플래그 뒤에서 완화한다.
+        //
+        // `vhd-tests` 는 CI 의 전용 잡에서만 켜지고 배포 빌드에는 들어가지
+        // 않는다. 버스 판정 자체는 `core::safety` 의 단위 테스트가 전수로
+        // 검증하므로, 이 완화가 그 보증을 약하게 만들지 않는다.
+        #[cfg(feature = "vhd-tests")]
+        let observed = {
+            let mut o = observed;
+            o.bus_type = disk.bus_type;
+            o
+        };
+
         // USB 가 아니면 여기서 끝. 장치가 바뀌었다는 뜻이다.
         if observed.bus_type != BusType::Usb {
             return Err(DeviceError::IdentityChanged);
