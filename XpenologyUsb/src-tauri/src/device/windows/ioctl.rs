@@ -81,27 +81,40 @@ fn last_error() -> DeviceError {
 
 /// 조회 전용으로 물리 디스크를 연다.
 ///
-/// 접근 권한 0 으로 열면 관리자 권한 없이도 성공한다. 목록을 보여주는 데
-/// 권한 상승을 요구하지 않기 위해 이 형태를 쓴다.
+/// **읽기 권한으로 연다.** 권한 0 으로 열면 관리자 권한 없이도 열리기는 하지만,
+/// 그 핸들로는 `IOCTL_DISK_GET_LENGTH_INFO` 가 실패한다. 이 제어 코드는
+/// `FILE_READ_ACCESS` 를 요구하기 때문이다 (코드 475228 의 access 비트 = 1).
+/// 반면 `IOCTL_STORAGE_QUERY_PROPERTY` 는 `FILE_ANY_ACCESS` 라 통과한다.
+///
+/// 그래서 권한 0 으로 열면 "버스 타입은 읽히는데 용량만 못 읽는" 상태가 되고,
+/// 용량 0 은 안전 규칙에서 미디어 없음으로 해석돼 **모든 디스크가 목록에서
+/// 사라진다.** 0.1.1 이 USB 를 하나도 찾지 못한 원인이 이것이었다.
+///
+/// 이 프로그램은 매니페스트로 항상 관리자 권한을 받으므로 읽기로 여는 데 문제가 없다.
+/// 그래도 권한을 못 받는 상황을 대비해 0 으로 한 번 더 시도한다. 그 경우 용량은
+/// `FILE_ANY_ACCESS` 인 기하 정보에서 얻는다.
 pub fn open_physical_drive_for_query(number: u32) -> Result<OwnedHandle, DeviceError> {
     let path = wide(&format!(r"\\.\PhysicalDrive{number}"));
-    // 안전성: path 는 널 종료된 UTF-16 이고 호출 동안 살아 있다.
-    let h = unsafe {
-        CreateFileW(
-            PCWSTR(path.as_ptr()),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )
+    for access in [FILE_GENERIC_READ.0, 0] {
+        // 안전성: path 는 널 종료된 UTF-16 이고 호출 동안 살아 있다.
+        let r = unsafe {
+            CreateFileW(
+                PCWSTR(path.as_ptr()),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+        };
+        if let Ok(h) = r {
+            if h != INVALID_HANDLE_VALUE {
+                return Ok(OwnedHandle(h));
+            }
+        }
     }
-    .map_err(|_| last_error())?;
-    if h == INVALID_HANDLE_VALUE {
-        return Err(last_error());
-    }
-    Ok(OwnedHandle(h))
+    Err(last_error())
 }
 
 /// 읽기/쓰기용으로 물리 디스크를 연다. 관리자 권한이 필요하다.
@@ -252,11 +265,19 @@ pub fn query_device_descriptor(h: &OwnedHandle) -> Result<DeviceDescriptor, Devi
 }
 
 /// 장치의 정확한 바이트 크기.
+///
+/// 두 경로를 시도한다. `IOCTL_DISK_GET_LENGTH_INFO` 가 더 정확하지만
+/// `FILE_READ_ACCESS` 를 요구해서 권한 없이 연 핸들에서는 실패한다.
+/// 그때는 `FILE_ANY_ACCESS` 인 기하 정보의 `DiskSize` 로 대신한다.
+///
+/// 둘 다 실패하면 **오류를 반환한다.** 예전에는 실패를 0 으로 바꿨는데,
+/// 0 은 안전 규칙에서 "미디어 없음"을 뜻해서 장치가 조용히 목록에서 사라졌다.
+/// 알 수 없는 값을 그럴듯한 값으로 바꾸지 않는다.
 pub fn query_length(h: &OwnedHandle) -> Result<u64, DeviceError> {
     let mut info = GET_LENGTH_INFORMATION::default();
     let mut returned = 0u32;
     // 안전성: info 는 이 스코프에 살아 있고 크기를 정확히 넘긴다.
-    unsafe {
+    let ok = unsafe {
         DeviceIoControl(
             h.raw(),
             IOCTL_DISK_GET_LENGTH_INFO,
@@ -267,9 +288,36 @@ pub fn query_length(h: &OwnedHandle) -> Result<u64, DeviceError> {
             Some(&mut returned),
             None,
         )
+    };
+    if ok.is_ok() && info.Length > 0 {
+        return Ok(info.Length as u64);
+    }
+
+    // 폴백: 기하 정보. 권한이 없어도 읽힌다.
+    let mut geo = DISK_GEOMETRY_EX::default();
+    let mut returned2 = 0u32;
+    // 안전성: geo 는 이 스코프에 살아 있고 크기를 정확히 넘긴다.
+    unsafe {
+        DeviceIoControl(
+            h.raw(),
+            IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+            None,
+            0,
+            Some(&mut geo as *mut _ as *mut _),
+            std::mem::size_of::<DISK_GEOMETRY_EX>() as u32,
+            Some(&mut returned2),
+            None,
+        )
     }
     .map_err(|_| last_error())?;
-    Ok(info.Length as u64)
+
+    if geo.DiskSize <= 0 {
+        return Err(DeviceError::Io {
+            code: 0,
+            message: "장치 용량을 알 수 없습니다".into(),
+        });
+    }
+    Ok(geo.DiskSize as u64)
 }
 
 /// 논리 섹터 크기.

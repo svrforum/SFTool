@@ -52,6 +52,8 @@ impl UsbEnumerator for WindowsEnumerator {
         let volumes = ioctl::enumerate_volumes();
 
         let mut disks = Vec::new();
+        // 열거에서 빠진 장치와 그 이유. 목록이 비었을 때 원인을 알려면 필요하다.
+        let mut skipped: Vec<String> = Vec::new();
         for number in 0..self.max_disks {
             // 조회 전용으로 연다. 접근 권한 0 이면 관리자가 아니어도 열린다.
             // 목록 표시에 권한 상승을 요구하지 않기 위해서다.
@@ -59,12 +61,27 @@ impl UsbEnumerator for WindowsEnumerator {
                 continue;
             };
 
-            let Ok(desc) = ioctl::query_device_descriptor(&handle) else {
-                // 버스 타입을 알 수 없으면 목록에 올리지 않는다.
-                // 안전 판정의 1차 근거가 없는 장치이기 때문이다.
-                continue;
+            let desc = match ioctl::query_device_descriptor(&handle) {
+                Ok(d) => d,
+                Err(e) => {
+                    // 버스 타입을 알 수 없으면 목록에 올리지 않는다.
+                    // 안전 판정의 1차 근거가 없는 장치이기 때문이다.
+                    // 다만 왜 빠졌는지는 남긴다 — 조용히 사라지면 원인을 찾을 수 없다.
+                    skipped.push(format!("디스크 {number}: 장치 정보 조회 실패 ({e:?})"));
+                    continue;
+                }
             };
-            let size = ioctl::query_length(&handle).unwrap_or(0);
+
+            // 용량 조회 실패를 0 으로 바꾸지 않는다. 0 은 안전 규칙에서
+            // "미디어 없음"을 뜻해서, 오류가 곧 "목록에서 감춤"이 되어버린다.
+            // 0.1.1 에서 모든 USB 가 사라진 원인이 정확히 이 변환이었다.
+            let size = match ioctl::query_length(&handle) {
+                Ok(s) => s,
+                Err(e) => {
+                    skipped.push(format!("디스크 {number}: 용량 조회 실패 ({e:?})"));
+                    continue;
+                }
+            };
 
             let mine: Vec<VolumeInfo> = volumes
                 .iter()
@@ -86,6 +103,15 @@ impl UsbEnumerator for WindowsEnumerator {
                 is_read_only: desc.read_only,
                 serial: desc.serial.clone(),
                 volumes: mine,
+            });
+        }
+
+        // 하나도 못 찾았다면 이유를 오류에 담아 올린다. 빈 목록만 보여주면
+        // 사용자는 USB 를 다시 꽂아보는 것 말고 할 수 있는 게 없다.
+        if disks.is_empty() && !skipped.is_empty() {
+            return Err(DeviceError::Io {
+                code: 0,
+                message: format!("디스크를 열거하지 못했습니다:\n{}", skipped.join("\n")),
             });
         }
         Ok(disks)

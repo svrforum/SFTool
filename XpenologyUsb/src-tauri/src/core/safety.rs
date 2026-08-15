@@ -439,6 +439,34 @@ mod tests {
         assert_eq!(is_listable(&d, &none()), Err(Rejection::NoMedia));
     }
 
+    /// 용량 0 은 "감춤" 을 뜻한다. 그래서 열거 계층이 용량 조회 실패를
+    /// 0 으로 바꾸면 오류가 곧 "장치 없음"이 되어 조용히 사라진다.
+    ///
+    /// 0.1.1 이 USB 를 하나도 못 찾은 원인이 정확히 이것이었다.
+    /// `IOCTL_DISK_GET_LENGTH_INFO` 가 권한 부족으로 실패했는데
+    /// `unwrap_or(0)` 이 그것을 미디어 없음으로 바꿔버렸다.
+    ///
+    /// 이 테스트는 그 위험을 문서로 고정한다 — 용량 0 의 의미가 이렇게 강하므로,
+    /// 조회 실패를 절대 0 으로 대체하면 안 된다.
+    #[test]
+    fn zero_size_means_hidden_so_never_substitute_it_for_an_error() {
+        let mut healthy = usb_disk(2);
+        healthy.size_bytes = 30_752_000_000;
+        assert!(
+            availability(&healthy, &none()).is_ready(),
+            "정상 USB 는 선택 가능해야 한다"
+        );
+
+        // 같은 장치인데 용량만 0 이면 목록에서 아예 사라진다.
+        let mut unknown_size = healthy.clone();
+        unknown_size.size_bytes = 0;
+        let a = availability(&unknown_size, &none());
+        assert!(
+            !a.is_visible(),
+            "용량 0 은 장치를 감춘다 — 오류를 0 으로 바꾸면 안 되는 이유"
+        );
+    }
+
     #[test]
     fn spanned_volume_rejected() {
         let mut d = usb_disk(2);
