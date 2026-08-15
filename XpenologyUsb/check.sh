@@ -31,6 +31,11 @@ cargo clippy --all-targets -- -D warnings
 if rustup target list --installed | grep -q "$WIN_TARGET"; then
   echo "==> clippy (Windows 타겟) — cfg(windows) 코드는 여기서만 검사된다"
   cargo clippy --target "$WIN_TARGET" --lib -- -D warnings
+
+  # VHD 통합 테스트는 여기서 컴파일만 확인한다. 실행에는 윈도우와 가상 디스크가
+  # 필요해서 CI 의 vhd-write 잡이 담당한다.
+  echo "==> VHD 통합 테스트 컴파일 확인"
+  cargo check --target "$WIN_TARGET" --features vhd-tests --all-targets
 else
   echo "!! Windows 타겟이 설치돼 있지 않아 건너뛴다."
   echo "!! cfg(windows) 코드가 검사되지 않으므로 CI 에서 처음 드러날 수 있다."

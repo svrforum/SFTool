@@ -76,3 +76,66 @@ jobs:
       - name: Test
         run: cargo test --all-targets
         working-directory: XpenologyUsb/src-tauri
+
+  # 가상 디스크에 실제로 쓰는 통합 테스트.
+  #
+  # 러너에 USB 는 없지만 VHD 는 붙일 수 있고, 붙이면 \\.\PhysicalDriveN 으로
+  # 잡힌다. 지금까지 이 프로젝트의 버그는 거의 전부 실행해봐야만 드러났고 —
+  # 컴파일도 되고 clippy 도 통과하고 단위 테스트도 초록불이었다 — 사용자가 대신
+  # 테스트해 주는 수밖에 없었다. 그 왕복을 여기서 끊는다.
+  #
+  # 재현되는 것: 핸들 접근 마스크, 잠금 순서, 파티션 삭제, 이미 레이아웃이 있는
+  # 장치에 다시 쓰기, 정렬 규칙.
+  # 재현되지 않는 것: 버스 타입 판정, 실제 USB 컨트롤러 특성, 안전 제거, 부팅.
+  vhd-write:
+    name: Write to a virtual disk
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: XpenologyUsb/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: XpenologyUsb/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Create and attach a virtual disk
+        id: vhd
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = "$env:RUNNER_TEMP\xpenology-test.vhdx"
+          New-VHD -Path $path -SizeBytes 12GB -Dynamic | Out-Null
+          $disk = Mount-VHD -Path $path -Passthru | Get-Disk
+          Initialize-Disk -Number $disk.Number -PartitionStyle MBR -Confirm:$false
+          Write-Host "가상 디스크 번호: $($disk.Number)"
+          if ($disk.Number -eq 0) { throw "디스크 0 이 잡혔다. 중단한다." }
+          "disk=$($disk.Number)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Write to it
+        shell: powershell
+        env:
+          XPENOLOGY_TEST_DISK: ${{ steps.vhd.outputs.disk }}
+        working-directory: XpenologyUsb/src-tauri
+        run: cargo test --features vhd-tests --test vhd_write -- --test-threads=1 --nocapture
+
+      - name: Detach the virtual disk
+        if: always()
+        shell: powershell
+        run: |
+          $p = "${{ steps.vhd.outputs.path }}"
+          if ($p -and (Test-Path $p)) {
+            Dismount-VHD -Path $p -ErrorAction SilentlyContinue
+            Remove-Item $p -Force -ErrorAction SilentlyContinue
+          }
