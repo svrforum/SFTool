@@ -155,18 +155,26 @@ impl Io for RealIo {
         ))
     }
 
-    fn open_decompressed(&self, data: Vec<u8>, name: &str) -> Result<Box<dyn Read + Send>, String> {
+    fn open_decompressed(
+        &self,
+        data: Vec<u8>,
+        name: &str,
+    ) -> Result<(Box<dyn Read + Send>, Option<u64>), String> {
         let lower = name.to_ascii_lowercase();
 
         if lower.ends_with(".gz") {
+            let size = gzip_expanded_size(&data, &lower);
             // MultiGzDecoder 를 쓴다. GzDecoder 는 **첫 번째 gzip 멤버에서 멈추고
             // EOF 를 보고한다.** 여러 멤버로 이어붙인 파일이면 이미지가 조용히
             // 잘리는데, 검증은 "쓴 것과 장치에 있는 것"만 비교하므로 잘린 채로도
             // 통과한다. 그러면 부팅되지 않는 USB 를 받아들고 원인을 가리킬
             // 단서가 하나도 남지 않는다.
-            return Ok(Box::new(flate2::read::MultiGzDecoder::new(
-                std::io::Cursor::new(data),
-            )));
+            return Ok((
+                Box::new(flate2::read::MultiGzDecoder::new(std::io::Cursor::new(
+                    data,
+                ))),
+                size,
+            ));
         }
 
         if lower.ends_with(".zip") {
@@ -188,11 +196,39 @@ impl Io for RealIo {
             // 이미지가 3GB 대라 메모리를 크게 쓰지만, 임시 파일을 만드는 것보다
             // 디스크 여유가 없는 기계에서 안전하다.
             let mut f = archive.by_index(idx).map_err(|e| e.to_string())?;
-            let mut out = Vec::with_capacity(f.size() as usize);
+            // zip 중앙 디렉터리에는 푼 크기가 정확히 들어 있다.
+            let size = f.size();
+            let mut out = Vec::with_capacity(size as usize);
             f.read_to_end(&mut out).map_err(|e| e.to_string())?;
-            return Ok(Box::new(std::io::Cursor::new(out)));
+            return Ok((Box::new(std::io::Cursor::new(out)), Some(size)));
         }
 
         Err(format!("알 수 없는 압축 형식입니다: {name}"))
     }
+}
+
+/// gzip 파일의 압축 해제 후 크기.
+///
+/// gzip 은 마지막 4바이트(ISIZE)에 원본 크기를 담지만 **2^32 로 나머지 연산된
+/// 값**이다. 4GiB 를 넘는 이미지는 실제보다 작게 나온다.
+///
+/// m-shell 표준판은 약 3.03GB 라 그대로 맞지만, 기본으로 고르는 `-5GB` 변형은
+/// 약 4.98GB 여서 4GiB 만큼 작게 읽힌다. 에셋 이름으로 그 경우를 알아내 보정한다.
+/// 진행률 표시에만 쓰는 값이라 어긋나도 치명적이지 않고, 실제로 넘어서면
+/// 호출부가 불확정 표시로 되돌린다.
+fn gzip_expanded_size(data: &[u8], lower_name: &str) -> Option<u64> {
+    if data.len() < 4 {
+        return None;
+    }
+    let tail = &data[data.len() - 4..];
+    let isize_val = u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]) as u64;
+    if isize_val == 0 {
+        return None;
+    }
+    // 4GiB 이상인 변형은 ISIZE 가 한 바퀴 돈다.
+    const FOUR_GIB: u64 = 4 * 1024 * 1024 * 1024;
+    if lower_name.contains("-5gb") && isize_val < FOUR_GIB {
+        return Some(isize_val + FOUR_GIB);
+    }
+    Some(isize_val)
 }

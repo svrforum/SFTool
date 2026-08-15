@@ -241,7 +241,13 @@ function render() {
         // 진행 중인 단계에만 속도나 부가 정보를 붙인다.
         let extra = '';
         if (active && p) {
-          if (p.stage === 'Downloading' && p.bytes_per_sec) {
+          // 오래 걸리는 단계에는 속도를 붙인다. 몇 분씩 걸리는 쓰기 단계에
+          // 아무 숫자도 없으면 멈춘 것처럼 보인다.
+          const timed =
+            p.stage === 'Downloading' ||
+            p.stage === 'Writing' ||
+            p.stage === 'Verifying';
+          if (timed && p.bytes_per_sec) {
             extra = t('speed', fmtBytes(p.bytes_per_sec));
           } else if (p.detail) {
             extra = p.detail;

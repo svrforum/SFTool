@@ -76,7 +76,15 @@ pub trait Io {
     /// 압축을 푼 스트림을 연다.
     ///
     /// gz 와 zip 을 모두 다뤄야 한다. zip 은 내부 항목 중 이미지 하나를 고른다.
-    fn open_decompressed(&self, data: Vec<u8>, name: &str) -> Result<Box<dyn Read + Send>, String>;
+    ///
+    /// 두 번째 값은 **압축을 푼 뒤의 크기**다. 알 수 있으면 돌려준다.
+    /// 이게 없으면 쓰기 단계 내내 진행률이 불확정으로 표시돼서, 사용자는
+    /// 몇 분 동안 아무 숫자도 없는 막대만 보게 된다.
+    fn open_decompressed(
+        &self,
+        data: Vec<u8>,
+        name: &str,
+    ) -> Result<(Box<dyn Read + Send>, Option<u64>), String>;
 }
 
 /// 취소 신호. 쓰기 도중에도 확인한다.
@@ -162,7 +170,7 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
     // 푼 내용을 파일로 떨구지 않고 장치로 바로 흘려보낸다.
     // 3GB 짜리 임시 파일을 만들지 않으므로 디스크 여유가 없는 기계에서도 동작한다.
     rep.begin(Stage::Extracting, None);
-    let mut stream = io
+    let (mut stream, expanded_size) = io
         .open_decompressed(compressed, &image.asset_name)
         .map_err(RunError::Extract)?;
 
@@ -220,9 +228,13 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
         offset += padded as u64;
 
         let now = std::time::Instant::now();
+        // 알고 있는 크기를 넘어서면 추정이 틀린 것이므로 불확정으로 되돌린다.
+        // 100% 를 넘겨 표시하거나, 다 됐다고 보여준 뒤 계속 도는 것이
+        // 아무 숫자도 없는 것보다 나쁘다 — 사용자가 USB 를 뽑는다.
+        let total = expanded_size.filter(|t| offset <= *t);
         rep.update(
             offset,
-            None, // 푼 크기를 미리 알 수 없어 불확정으로 표시한다
+            total,
             now.duration_since(last_t).as_secs_f64(),
             padded as u64,
         );
@@ -333,8 +345,9 @@ mod tests {
             &self,
             data: Vec<u8>,
             _name: &str,
-        ) -> Result<Box<dyn Read + Send>, String> {
-            Ok(Box::new(std::io::Cursor::new(data)))
+        ) -> Result<(Box<dyn Read + Send>, Option<u64>), String> {
+            let n = data.len() as u64;
+            Ok((Box::new(std::io::Cursor::new(data)), Some(n)))
         }
     }
 

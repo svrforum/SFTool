@@ -56,7 +56,19 @@ pub struct ProgressReporter<F: FnMut(ProgressEvent)> {
     detail: Option<String>,
     /// 마지막으로 내보낸 퍼센트. 같은 값을 반복해서 보내지 않는다.
     last_percent: Option<u8>,
+    /// 속도 계산용 누적치.
+    ///
+    /// 호출마다 순간 속도를 계산하면 안 된다. 내려받기 콜백은 256KB 읽을 때마다
+    /// 불리는데, 소켓 버퍼에 쌓여 있던 것을 연달아 읽으면 간격이 0.1ms 도 안 되고
+    /// 그러면 256KB / 0.0001s = 2.5GB/s 같은 값이 나온다. 실제 회선 속도와
+    /// 무관한 숫자라 사용자에게는 그냥 잘못된 정보다.
+    /// 최소 이 시간만큼 모은 뒤에 한 번 계산한다.
+    window_bytes: u64,
+    window_secs: f64,
 }
+
+/// 속도를 다시 계산하기까지 모으는 시간.
+const RATE_WINDOW_SECS: f64 = 0.5;
 
 impl<F: FnMut(ProgressEvent)> ProgressReporter<F> {
     pub fn new(emit: F) -> Self {
@@ -67,6 +79,8 @@ impl<F: FnMut(ProgressEvent)> ProgressReporter<F> {
             rate: RateEstimator::new(),
             detail: None,
             last_percent: None,
+            window_bytes: 0,
+            window_secs: 0.0,
         }
     }
 
@@ -79,6 +93,8 @@ impl<F: FnMut(ProgressEvent)> ProgressReporter<F> {
         self.detail = detail;
         self.rate = RateEstimator::new();
         self.last_percent = None;
+        self.window_bytes = 0;
+        self.window_secs = 0.0;
         self.emit_now(0, None);
     }
 
@@ -87,7 +103,15 @@ impl<F: FnMut(ProgressEvent)> ProgressReporter<F> {
     /// 퍼센트가 바뀌지 않았으면 내보내지 않는다. 3GB 를 32KB 씩 읽으면
     /// 십만 번 넘게 호출되는데, 그대로 보내면 UI 스레드가 이벤트에 잠긴다.
     pub fn update(&mut self, done: u64, total: Option<u64>, elapsed_secs: f64, chunk: u64) {
-        self.rate.sample(chunk, elapsed_secs);
+        // 시간 창으로 묶어 계산한다. 호출마다 계산하면 간격이 너무 짧아
+        // 회선 속도와 무관한 값이 나온다.
+        self.window_bytes += chunk;
+        self.window_secs += elapsed_secs.max(0.0);
+        if self.window_secs >= RATE_WINDOW_SECS {
+            self.rate.sample(self.window_bytes, self.window_secs);
+            self.window_bytes = 0;
+            self.window_secs = 0.0;
+        }
         let p = percent(done, total);
         if p != self.last_percent {
             self.last_percent = p;
@@ -167,6 +191,41 @@ mod tests {
         let emitted = out.borrow().len() - before;
         assert!(emitted <= 100, "이벤트가 너무 많다: {emitted}");
         assert!(emitted > 0, "이벤트가 아예 없다");
+    }
+
+    /// 내려받기 콜백은 256KB 마다 불리고, 소켓 버퍼에 쌓인 것을 연달아 읽으면
+    /// 간격이 0.1ms 도 안 된다. 그 순간값을 그대로 쓰면 2.5GB/s 같은 숫자가 나온다.
+    /// 실제로 사용자 화면에 1GB/s 가 떴다.
+    #[test]
+    fn burst_reads_do_not_produce_absurd_speeds() {
+        let (out, sink) = collector();
+        let mut r = ProgressReporter::new(sink);
+        r.begin(Stage::Downloading, None);
+
+        // 40MB/s 회선에서 256KB 를 읽는 데 걸리는 시간은 약 6.4ms.
+        // 그런데 버퍼에 쌓인 것을 연달아 읽으면 0.05ms 만에 돌아온다.
+        // 두 경우를 섞어 실제 상황을 흉내낸다.
+        let chunk = 256 * 1024u64;
+        let mut done = 0u64;
+        for i in 0..400 {
+            done += chunk;
+            let dt = if i % 8 == 0 { 0.0500 } else { 0.000_05 };
+            r.update(done, Some(600_000_000), dt, chunk);
+        }
+
+        let speed = out
+            .borrow()
+            .iter()
+            .filter_map(|e| e.bytes_per_sec)
+            .max()
+            .expect("속도가 보고돼야 한다");
+
+        // 평균 실제 속도는 대략 40MB/s 근처다. 순간값을 쓰면 GB/s 대가 나온다.
+        assert!(
+            speed < 500_000_000,
+            "말이 안 되는 속도가 보고됐다: {} B/s",
+            speed
+        );
     }
 
     #[test]
