@@ -5,6 +5,29 @@
   이 매니페스트가 없으면 프로그램이 할 수 있는 일이 없다.
 -->
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <!--
+    Common Controls 6 의존성. 빠뜨리면 안 된다.
+
+    이것이 없으면 윈도우가 comctl32.dll 5.82 를 로드하는데, 거기에는
+    TaskDialogIndirect 가 없어서 실행 즉시 "프로시저 시작 지점을 찾을 수 없습니다"
+    로 죽는다. Tauri 의 기본 매니페스트에 원래 들어 있던 항목인데,
+    관리자 권한을 넣으려고 매니페스트를 직접 작성하면서 함께 지워져 0.1.0 이
+    실행조차 되지 않았다. 매니페스트를 교체할 때는 기본값에 무엇이 있었는지
+    먼저 확인할 것.
+  -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
