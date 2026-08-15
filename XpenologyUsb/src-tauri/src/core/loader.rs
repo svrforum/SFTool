@@ -261,7 +261,10 @@ mod tests {
 
     #[test]
     fn resolves_new_alpine_prefix() {
-        let rs = vec![release("v1.4.2.8", mshell_assets("v1.4.2.8", "alpine-redpill"))];
+        let rs = vec![release(
+            "v1.4.2.8",
+            mshell_assets("v1.4.2.8", "alpine-redpill"),
+        )];
         let got = resolve(Loader::MShell, &rs).unwrap();
         assert!(got.asset_name.starts_with("alpine-redpill."));
         assert!(got.asset_name.contains("m-shell"));
@@ -293,7 +296,10 @@ mod tests {
     #[test]
     fn never_picks_vmdk() {
         // vmdk 를 USB 에 구우면 부팅되지 않는다.
-        let rs = vec![release("v1.4.2.8", mshell_assets("v1.4.2.8", "alpine-redpill"))];
+        let rs = vec![release(
+            "v1.4.2.8",
+            mshell_assets("v1.4.2.8", "alpine-redpill"),
+        )];
         let got = resolve(Loader::MShell, &rs).unwrap();
         assert!(!got.asset_name.contains("vmdk"));
         assert!(got.asset_name.ends_with(".img.gz"));
@@ -302,7 +308,10 @@ mod tests {
     #[test]
     fn prefers_5gb_variant_when_available() {
         // 실사용 통계상 -5GB 쪽이 더 많이 받아진다 (v1.4.2.8 기준 85 vs 58).
-        let rs = vec![release("v1.4.2.8", mshell_assets("v1.4.2.8", "alpine-redpill"))];
+        let rs = vec![release(
+            "v1.4.2.8",
+            mshell_assets("v1.4.2.8", "alpine-redpill"),
+        )];
         let got = resolve(Loader::MShell, &rs).unwrap();
         assert_eq!(got.asset_name, "alpine-redpill.v1.4.2.8.m-shell-5GB.img.gz");
     }
@@ -337,7 +346,10 @@ mod tests {
 
     #[test]
     fn never_picks_xtcrp_when_mshell_requested() {
-        let rs = vec![release("v1.4.2.8", mshell_assets("v1.4.2.8", "alpine-redpill"))];
+        let rs = vec![release(
+            "v1.4.2.8",
+            mshell_assets("v1.4.2.8", "alpine-redpill"),
+        )];
         let got = resolve(Loader::MShell, &rs).unwrap();
         assert!(got.asset_name.contains("m-shell"));
     }
@@ -418,7 +430,10 @@ mod tests {
     #[test]
     fn mshell_has_no_checksum_and_that_is_ok() {
         // m-shell 은 체크섬을 전혀 제공하지 않는다. 없다고 실패하면 안 된다.
-        let rs = vec![release("v1.4.2.8", mshell_assets("v1.4.2.8", "alpine-redpill"))];
+        let rs = vec![release(
+            "v1.4.2.8",
+            mshell_assets("v1.4.2.8", "alpine-redpill"),
+        )];
         let got = resolve(Loader::MShell, &rs).unwrap();
         assert_eq!(got.checksum_url, None);
     }
@@ -436,7 +451,10 @@ mod tests {
             }],
         )];
         let got = resolve(Loader::MShell, &rs).unwrap();
-        assert_eq!(got.download_url, "https://cdn.example.invalid/redirected/path");
+        assert_eq!(
+            got.download_url,
+            "https://cdn.example.invalid/redirected/path"
+        );
     }
 
     // --- 실패 경로 ---

@@ -116,7 +116,10 @@ mod tests {
         let entries = list_disks_with(&FakeEnumerator::sample()).unwrap();
         let small = entries.iter().find(|e| e.number == 4).unwrap();
         assert!(!small.ready);
-        assert_eq!(small.blocked_reason.as_deref(), Some("too_small_for_any_image"));
+        assert_eq!(
+            small.blocked_reason.as_deref(),
+            Some("too_small_for_any_image")
+        );
         // 최소 요구 용량을 함께 넘겨 "8GB 이상이 필요합니다" 를 만들 수 있게 한다.
         assert!(small.blocked_detail.is_some());
     }

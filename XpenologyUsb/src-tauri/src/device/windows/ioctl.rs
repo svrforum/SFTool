@@ -14,16 +14,20 @@ use windows::Win32::Foundation::{
     CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, MAX_PATH,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetVolumeInformationW,
-    GetVolumePathNamesForVolumeNameW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_NO_BUFFERING,
-    FILE_FLAG_WRITE_THROUGH, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, DefineDosDeviceW, DeleteVolumeMountPointW, FindFirstVolumeW, FindNextVolumeW,
+    FindVolumeClose, FlushFileBuffers, GetVolumeInformationW, GetVolumePathNamesForVolumeNameW,
+    ReadFile, SetFilePointerEx, WriteFile, DDD_REMOVE_DEFINITION, FILE_ATTRIBUTE_NORMAL,
+    FILE_BEGIN, FILE_FLAG_NO_BUFFERING, FILE_FLAG_WRITE_THROUGH, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+    OPEN_EXISTING, STORAGE_BUS_TYPE,
 };
 use windows::Win32::System::Ioctl::{
-    DISK_GEOMETRY_EX, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-    IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_QUERY_PROPERTY,
-    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, PropertyStandardQuery, STORAGE_BUS_TYPE,
-    STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY, StorageDeviceProperty, VOLUME_DISK_EXTENTS,
+    PropertyStandardQuery, StorageDeviceProperty, CREATE_DISK, DISK_GEOMETRY_EX,
+    FSCTL_ALLOW_EXTENDED_DASD_IO, FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, FSCTL_UNLOCK_VOLUME,
+    GET_LENGTH_INFORMATION, IOCTL_DISK_CREATE_DISK, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+    IOCTL_DISK_GET_LENGTH_INFO, IOCTL_DISK_UPDATE_PROPERTIES, IOCTL_STORAGE_EJECT_MEDIA,
+    IOCTL_STORAGE_MEDIA_REMOVAL, IOCTL_STORAGE_QUERY_PROPERTY, PARTITION_STYLE_RAW,
+    PREVENT_MEDIA_REMOVAL, STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY, VOLUME_DISK_EXTENTS,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
@@ -32,6 +36,12 @@ use windows::Win32::System::IO::DeviceIoControl;
 /// 이 프로그램은 잠금을 오래 들고 있으므로 핸들 누수가 곧 "USB 를 뽑을 수 없음"
 /// 으로 이어진다. 수동 CloseHandle 에 의존하지 않는다.
 pub struct OwnedHandle(HANDLE);
+
+// 안전성: HANDLE 은 커널 객체를 가리키는 불투명한 값이고, 커널 핸들은
+// 스레드에 묶여 있지 않다. 이 타입이 단독 소유하므로 다른 스레드로
+// 넘겨도 경합이 생기지 않는다. 쓰기 작업을 백그라운드 스레드에서 돌리려면
+// 이 표시가 필요하다.
+unsafe impl Send for OwnedHandle {}
 
 impl OwnedHandle {
     pub fn raw(&self) -> HANDLE {
@@ -418,11 +428,7 @@ fn volume_details(guid_with_slash: &str) -> (Option<char>, Option<String>, u64) 
     let mut len = 0u32;
     // 안전성: 두 버퍼 모두 호출 동안 살아 있고 크기를 정확히 넘긴다.
     let letter = unsafe {
-        GetVolumePathNamesForVolumeNameW(
-            PCWSTR(path.as_ptr()),
-            Some(&mut names),
-            &mut len,
-        )
+        GetVolumePathNamesForVolumeNameW(PCWSTR(path.as_ptr()), Some(&mut names), &mut len)
     }
     .ok()
     .and_then(|_| {
@@ -444,9 +450,7 @@ fn volume_details(guid_with_slash: &str) -> (Option<char>, Option<String>, u64) 
     }
     .ok()
     .map(|_| {
-        String::from_utf16_lossy(
-            &fs_name[..fs_name.iter().position(|c| *c == 0).unwrap_or(0)],
-        )
+        String::from_utf16_lossy(&fs_name[..fs_name.iter().position(|c| *c == 0).unwrap_or(0)])
     })
     .filter(|s| !s.is_empty());
 
@@ -512,3 +516,230 @@ fn drive_prefix(p: &Path) -> Option<String> {
     Some(format!(r"\\.\{}:", c.to_ascii_uppercase()))
 }
 
+// ---------------------------------------------------------------------------
+// 쓰기 경로
+// ---------------------------------------------------------------------------
+
+/// 섹터 정렬된 버퍼.
+///
+/// `FILE_FLAG_NO_BUFFERING` 으로 연 핸들은 버퍼 주소가 섹터 경계에 맞기를
+/// 요구한다. 문서상 "강제되지 않을 수 있다" 지만 지키지 않을 이유가 없다 —
+/// 어긋났을 때 나는 오류가 원인을 짐작하기 어려운 종류다.
+///
+/// Rust 의 기본 할당은 정렬을 보장하지 않으므로 직접 할당한다.
+pub struct AlignedBuf {
+    ptr: *mut u8,
+    len: usize,
+    layout: std::alloc::Layout,
+}
+
+// 안전성: 내부 포인터는 이 타입이 단독 소유하며 다른 스레드와 공유되지 않는다.
+unsafe impl Send for AlignedBuf {}
+
+impl AlignedBuf {
+    pub fn new(len: usize, align: usize) -> Self {
+        let align = align.max(std::mem::align_of::<u8>()).next_power_of_two();
+        let layout = std::alloc::Layout::from_size_align(len, align).expect("잘못된 버퍼 레이아웃");
+        // 안전성: len > 0 이고 layout 이 유효하다. 실패하면 아래에서 중단한다.
+        let ptr = unsafe { std::alloc::alloc(layout) };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        Self { ptr, len, layout }
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        // 안전성: ptr 은 len 바이트의 유효한 할당이고 이 타입이 소유한다.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl Drop for AlignedBuf {
+    fn drop(&mut self) {
+        // 안전성: ptr 과 layout 은 alloc 에 넘긴 것과 같은 쌍이다.
+        unsafe { std::alloc::dealloc(self.ptr, self.layout) }
+    }
+}
+
+/// 파일 포인터를 옮긴다.
+fn seek(h: &OwnedHandle, offset: u64) -> Result<(), DeviceError> {
+    let mut new = 0i64;
+    // 안전성: new 는 이 스코프에 살아 있다.
+    unsafe { SetFilePointerEx(h.raw(), offset as i64, Some(&mut new), FILE_BEGIN) }
+        .map_err(|_| last_error())
+}
+
+/// 지정 위치에 쓴다.
+///
+/// `WriteFile` 은 성공을 반환하면서도 요청보다 적게 쓸 수 있다.
+/// 그 경우를 성공으로 취급하면 이미지에 구멍이 생긴다.
+pub fn write_raw(
+    h: &OwnedHandle,
+    offset: u64,
+    ptr: *const u8,
+    len: usize,
+) -> Result<(), DeviceError> {
+    seek(h, offset)?;
+    let mut written = 0u32;
+    // 안전성: ptr 은 len 바이트의 유효한 읽기 가능 메모리이고 호출 동안 살아 있다.
+    unsafe {
+        WriteFile(
+            h.raw(),
+            Some(std::slice::from_raw_parts(ptr, len)),
+            Some(&mut written),
+            None,
+        )
+    }
+    .map_err(|_| last_error())?;
+
+    if written as usize != len {
+        return Err(DeviceError::Io {
+            code: 0,
+            message: format!("짧은 쓰기: {written} / {len} 바이트"),
+        });
+    }
+    Ok(())
+}
+
+/// 슬라이스를 그대로 쓴다. 정렬은 호출부가 보장한다.
+pub fn write_at(h: &OwnedHandle, offset: u64, data: &[u8]) -> Result<(), DeviceError> {
+    write_raw(h, offset, data.as_ptr(), data.len())
+}
+
+/// 지정 위치에서 읽는다.
+pub fn read_at(h: &OwnedHandle, offset: u64, buf: &mut [u8]) -> Result<(), DeviceError> {
+    seek(h, offset)?;
+    let mut read = 0u32;
+    // 안전성: buf 는 호출 동안 살아 있고 크기를 정확히 넘긴다.
+    unsafe { ReadFile(h.raw(), Some(buf), Some(&mut read), None) }.map_err(|_| last_error())?;
+    if read as usize != buf.len() {
+        return Err(DeviceError::Io {
+            code: 0,
+            message: format!("짧은 읽기: {read} / {} 바이트", buf.len()),
+        });
+    }
+    Ok(())
+}
+
+/// 캐시를 장치까지 내린다.
+pub fn flush(h: &OwnedHandle) -> Result<(), DeviceError> {
+    // 안전성: 유효한 핸들이다.
+    unsafe { FlushFileBuffers(h.raw()) }.map_err(|_| last_error())
+}
+
+// ---------------------------------------------------------------------------
+// 잠금과 레이아웃
+// ---------------------------------------------------------------------------
+
+/// 인자 없는 제어 코드를 보낸다. 실패해도 무시하는 용도.
+fn control(h: &OwnedHandle, code: u32) -> bool {
+    let mut returned = 0u32;
+    // 안전성: 입출력 버퍼가 없는 제어 코드다.
+    unsafe { DeviceIoControl(h.raw(), code, None, 0, None, 0, Some(&mut returned), None).is_ok() }
+}
+
+/// 경계 검사를 끈다. 볼륨 끝 섹터에 접근하려면 필요하다.
+pub fn allow_extended_dasd_io(h: &OwnedHandle) -> bool {
+    control(h, FSCTL_ALLOW_EXTENDED_DASD_IO)
+}
+
+/// 볼륨을 잠근다. 열린 파일이 있으면 실패하므로 재시도한다.
+pub fn lock_volume_with_retry(
+    h: &OwnedHandle,
+    retries: u32,
+    interval: std::time::Duration,
+) -> Result<(), DeviceError> {
+    for _ in 0..retries {
+        if control(h, FSCTL_LOCK_VOLUME) {
+            return Ok(());
+        }
+        std::thread::sleep(interval);
+    }
+    Err(DeviceError::Locked)
+}
+
+pub fn dismount_volume(h: &OwnedHandle) -> bool {
+    control(h, FSCTL_DISMOUNT_VOLUME)
+}
+
+pub fn unlock_volume(h: &OwnedHandle) -> bool {
+    control(h, FSCTL_UNLOCK_VOLUME)
+}
+
+/// 파티션 테이블을 재인식시킨다.
+pub fn update_properties(h: &OwnedHandle) -> bool {
+    control(h, IOCTL_DISK_UPDATE_PROPERTIES)
+}
+
+pub fn allow_media_removal(h: &OwnedHandle) -> bool {
+    let mut prevent = PREVENT_MEDIA_REMOVAL::default();
+    prevent.PreventMediaRemoval = false.into();
+    let mut returned = 0u32;
+    // 안전성: prevent 는 이 스코프에 살아 있고 크기를 정확히 넘긴다.
+    unsafe {
+        DeviceIoControl(
+            h.raw(),
+            IOCTL_STORAGE_MEDIA_REMOVAL,
+            Some(&prevent as *const _ as *const _),
+            std::mem::size_of::<PREVENT_MEDIA_REMOVAL>() as u32,
+            None,
+            0,
+            Some(&mut returned),
+            None,
+        )
+        .is_ok()
+    }
+}
+
+pub fn eject_media(h: &OwnedHandle) -> bool {
+    control(h, IOCTL_STORAGE_EJECT_MEDIA)
+}
+
+/// 디스크를 RAW 로 초기화한다.
+///
+/// `IOCTL_DISK_DELETE_DRIVE_LAYOUT` 을 쓰지 않는 이유는 그것이 MBR 전용이라
+/// GPT 백업 헤더를 남기기 때문이다.
+pub fn create_disk_raw(h: &OwnedHandle) -> Result<(), DeviceError> {
+    let mut cd = CREATE_DISK::default();
+    cd.PartitionStyle = PARTITION_STYLE_RAW;
+    let mut returned = 0u32;
+    // 안전성: cd 는 이 스코프에 살아 있고 크기를 정확히 넘긴다.
+    unsafe {
+        DeviceIoControl(
+            h.raw(),
+            IOCTL_DISK_CREATE_DISK,
+            Some(&cd as *const _ as *const _),
+            std::mem::size_of::<CREATE_DISK>() as u32,
+            None,
+            0,
+            Some(&mut returned),
+            None,
+        )
+    }
+    .map_err(|_| last_error())
+}
+
+/// 드라이브 문자를 뗀다.
+///
+/// 문자가 붙어 있으면 Windows 가 볼륨을 계속 다시 마운트한다.
+/// 실패는 무시한다 — 문자가 이미 없을 수 있다.
+pub fn remove_mount_point(letter: char) {
+    let dos = wide(&format!("{}:", letter.to_ascii_uppercase()));
+    // 안전성: dos 는 널 종료 UTF-16 이고 호출 동안 살아 있다.
+    unsafe {
+        let _ = DefineDosDeviceW(DDD_REMOVE_DEFINITION, PCWSTR(dos.as_ptr()), PCWSTR::null());
+    }
+    let mount = wide(&format!(r"{}:\", letter.to_ascii_uppercase()));
+    // 안전성: 위와 동일.
+    unsafe {
+        let _ = DeleteVolumeMountPointW(PCWSTR(mount.as_ptr()));
+    }
+}

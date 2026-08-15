@@ -245,7 +245,10 @@ impl FakeWriter {
 impl RawWriter for FakeWriter {
     fn open(&self, disk: &DiskInfo) -> Result<Box<dyn WriteSession>, DeviceError> {
         Ok(Box::new(FakeSession {
-            observed: self.observed_override.clone().unwrap_or_else(|| disk.clone()),
+            observed: self
+                .observed_override
+                .clone()
+                .unwrap_or_else(|| disk.clone()),
             sector_size: self.sector_size,
             data: Arc::clone(&self.storage),
             finished: Arc::clone(&self.finished),
