@@ -7,6 +7,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { t, getLang, setLang, reasonText, type Lang } from './i18n';
 import './styles.css';
 
@@ -281,7 +282,9 @@ function render() {
         <div class="stages">${list}</div>
         ${bar}
       </main>`;
-    foot = `<button class="ghost" data-go="3">${esc(t('cancel'))}</button>`;
+    // 취소는 화면만 되돌리는 것이 아니라 백엔드 작업을 실제로 멈춰야 한다.
+    // 쓰기가 계속 도는데 화면만 3단계로 가면 사용자가 USB 를 뽑는다.
+    foot = `<button class="ghost" data-cancel="1">${esc(t('cancel'))}</button>`;
   } else if (state.step === 6) {
     // 실패 화면. 원인마다 다음에 뭘 해야 하는지 함께 알려준다.
     const f = state.failure;
@@ -321,10 +324,17 @@ function render() {
 }
 
 app.addEventListener('click', (e) => {
-  const el = (e.target as HTMLElement).closest<HTMLElement>('[data-disk],[data-loader],[data-go],[data-lang]');
+  const el = (e.target as HTMLElement).closest<HTMLElement>(
+    '[data-disk],[data-loader],[data-go],[data-lang],[data-cancel]',
+  );
   if (!el) return;
 
-  if (el.dataset.disk) {
+  if (el.dataset.cancel) {
+    // 백엔드에 멈추라고 알린다. 화면 전환은 작업이 실제로 끝난 뒤
+    // write_image 가 반환하면서 이뤄진다.
+    if (!isBrowserPreview()) invoke('cancel_write').catch(() => {});
+    else state.step = 3;
+  } else if (el.dataset.disk) {
     state.selectedDisk = Number(el.dataset.disk);
   } else if (el.dataset.loader) {
     state.loader = el.dataset.loader as LoaderId;
@@ -358,6 +368,13 @@ async function startWrite() {
     return;
   }
 
+  // 백엔드가 흘려보내는 진행 이벤트를 구독한다.
+  // 작업이 끝나면 해제해서, 다시 실행할 때 리스너가 쌓이지 않게 한다.
+  const unlisten = await listen<ProgressEvent>('progress', (e) => {
+    state.progress = e.payload;
+    if (state.step === 4) render();
+  });
+
   try {
     await invoke('write_image', {
       diskNumber: state.selectedDisk,
@@ -368,6 +385,8 @@ async function startWrite() {
   } catch (err) {
     state.failure = normalizeFailure(err);
     state.step = 6;
+  } finally {
+    unlisten();
   }
   render();
 }

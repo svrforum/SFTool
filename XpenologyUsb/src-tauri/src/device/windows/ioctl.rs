@@ -680,8 +680,9 @@ pub fn update_properties(h: &OwnedHandle) -> bool {
 }
 
 pub fn allow_media_removal(h: &OwnedHandle) -> bool {
-    let mut prevent = PREVENT_MEDIA_REMOVAL::default();
-    prevent.PreventMediaRemoval = false.into();
+    let prevent = PREVENT_MEDIA_REMOVAL {
+        PreventMediaRemoval: false,
+    };
     let mut returned = 0u32;
     // 안전성: prevent 는 이 스코프에 살아 있고 크기를 정확히 넘긴다.
     unsafe {
@@ -708,8 +709,10 @@ pub fn eject_media(h: &OwnedHandle) -> bool {
 /// `IOCTL_DISK_DELETE_DRIVE_LAYOUT` 을 쓰지 않는 이유는 그것이 MBR 전용이라
 /// GPT 백업 헤더를 남기기 때문이다.
 pub fn create_disk_raw(h: &OwnedHandle) -> Result<(), DeviceError> {
-    let mut cd = CREATE_DISK::default();
-    cd.PartitionStyle = PARTITION_STYLE_RAW;
+    let cd = CREATE_DISK {
+        PartitionStyle: PARTITION_STYLE_RAW,
+        ..Default::default()
+    };
     let mut returned = 0u32;
     // 안전성: cd 는 이 스코프에 살아 있고 크기를 정확히 넘긴다.
     unsafe {

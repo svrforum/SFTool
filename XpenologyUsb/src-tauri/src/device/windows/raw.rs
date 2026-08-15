@@ -187,7 +187,7 @@ impl WriteSession for WindowsSession {
         let ss = self.sector_size as u64;
         // 여기서 걸러내지 않으면 Windows 가 ERROR_INVALID_PARAMETER(87) 를 내는데,
         // 그 오류만 보고는 원인이 정렬이라는 것을 알기 어렵다.
-        if offset % ss != 0 || data.len() as u64 % ss != 0 {
+        if !offset.is_multiple_of(ss) || !(data.len() as u64).is_multiple_of(ss) {
             return Err(DeviceError::Io {
                 code: 87,
                 message: format!("정렬 오류: 오프셋 {offset}, 길이 {}, 섹터 {ss}", data.len()),
@@ -221,7 +221,7 @@ impl WriteSession for WindowsSession {
     fn zero_tail(&mut self, bytes: u64) -> Result<(), DeviceError> {
         let ss = self.sector_size as u64;
         // 지울 길이를 섹터 배수로 올림한다.
-        let len = ((bytes + ss - 1) / ss) * ss;
+        let len = bytes.div_ceil(ss) * ss;
         let len = len.min(self.total_bytes);
         let start = self.total_bytes - len;
         // 시작점도 섹터 경계에 맞춘다.
@@ -245,7 +245,7 @@ impl WriteSession for WindowsSession {
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DeviceError> {
         let ss = self.sector_size as u64;
-        if offset % ss != 0 || buf.len() as u64 % ss != 0 {
+        if !offset.is_multiple_of(ss) || !(buf.len() as u64).is_multiple_of(ss) {
             return Err(DeviceError::Io {
                 code: 87,
                 message: "정렬되지 않은 읽기".into(),
