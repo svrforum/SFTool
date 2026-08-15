@@ -16,6 +16,8 @@ const ko: Dict = {
   step1_lead: 'USB 저장장치만 표시됩니다. 내장 디스크는 목록에 나오지 않습니다.',
   step1_empty: '연결된 USB가 없습니다',
   step1_empty_hint: 'USB를 꽂으면 자동으로 나타납니다',
+  refresh: '새로고침',
+  refreshing: '찾는 중…',
 
   step2_title: '어떤 로더를\n쓰시겠어요?',
   step2_lead: '최신 버전을 자동으로 받아옵니다.',
@@ -102,6 +104,8 @@ const en: Dict = {
     'Only USB storage is listed. Internal disks never appear here.',
   step1_empty: 'No USB drive connected',
   step1_empty_hint: 'Plug one in and it will show up automatically',
+  refresh: 'Refresh',
+  refreshing: 'Scanning…',
 
   step2_title: 'Which loader\nwould you like?',
   step2_lead: 'The latest release is fetched automatically.',

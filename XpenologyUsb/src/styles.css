@@ -542,3 +542,35 @@ button.mini:disabled {
   line-height: 1.6;
   text-align: left;
 }
+
+/* 1단계 제목 줄의 새로고침 */
+.row-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+button.refresh {
+  flex: none;
+  margin-top: 4px;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-sub);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+button.refresh:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  color: var(--fg);
+}
+
+button.refresh:disabled {
+  color: var(--fg-mute);
+  cursor: default;
+}

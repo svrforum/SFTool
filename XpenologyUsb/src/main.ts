@@ -68,6 +68,8 @@ type State = {
   summary: RunSummary | null;
   /** 안전 제거 상태. null 이면 아직 누르지 않은 것. */
   eject: 'busy' | 'ok' | 'fail' | null;
+  /** 목록을 다시 읽는 중인가. */
+  scanning: boolean;
 };
 
 const state: State = {
@@ -82,6 +84,7 @@ const state: State = {
   failure: null,
   summary: null,
   eject: null,
+  scanning: false,
 };
 
 /** 실행할 단계 순서. 검증은 선택이라 켰을 때만 들어간다. */
@@ -208,7 +211,12 @@ function render() {
       ${segs(1)}
       <main>
         <div class="eyebrow">1 / 4</div>
-        <h1>${nl(t('step1_title'))}</h1>
+        <div class="row-head">
+          <h1>${nl(t('step1_title'))}</h1>
+          <button class="refresh" data-refresh="1" ${
+            state.scanning ? 'disabled' : ''
+          } title="${esc(t('refresh'))}">${state.scanning ? '⋯' : '↻'}</button>
+        </div>
         <p class="lead">${esc(t('step1_lead'))}</p>
         <div class="list">
           ${
@@ -386,6 +394,10 @@ app.addEventListener('click', (e) => {
   );
   if (!el) return;
 
+  if (el.dataset.refresh) {
+    void refreshDisks();
+    return;
+  }
   if (el.dataset.eject) {
     doEject();
     return;
@@ -615,6 +627,57 @@ const previewDisks: DiskEntry[] = [
   },
 ];
 
+/**
+ * 목록을 다시 읽는다.
+ *
+ * 겹쳐 호출되지 않게 막는다. 열거는 디스크 번호 64개를 훑고 볼륨까지 열거하므로
+ * 싸지 않다.
+ */
+async function refreshDisks(): Promise<void> {
+  if (state.scanning) return;
+  state.scanning = true;
+  render();
+  try {
+    const next = isBrowserPreview()
+      ? previewDisks
+      : await invoke<DiskEntry[]>('list_disks');
+    state.disks = next;
+
+    // 고른 USB 가 사라졌으면 선택을 지운다. 남겨두면 "다음" 이 눌리는데
+    // 대상이 없는 상태가 된다.
+    if (
+      state.selectedDisk != null &&
+      !next.some((d) => d.number === state.selectedDisk && d.ready)
+    ) {
+      state.selectedDisk = null;
+    }
+    // 쓸 수 있는 것이 하나뿐이면 미리 골라둔다.
+    const ready = next.filter((d) => d.ready);
+    if (state.selectedDisk == null && ready.length === 1) {
+      state.selectedDisk = ready[0].number;
+    }
+  } catch (err) {
+    console.error('목록 갱신 실패', err);
+    state.disks = [];
+  } finally {
+    state.scanning = false;
+    render();
+  }
+}
+
+/**
+ * 1단계에 머무는 동안 주기적으로 다시 읽는다.
+ *
+ * 빈 화면에 "USB 를 꽂으면 자동으로 나타납니다" 라고 적어두고 실제로는 시작할 때
+ * 한 번만 읽고 있었다. 사용자가 USB 를 다시 꽂아도 앱을 껐다 켜야 보였다.
+ * 적어둔 대로 동작하게 만든다.
+ */
+function startAutoScan() {
+  setInterval(() => {
+    if (state.step === 1 && !state.scanning) void refreshDisks();
+  }, 3000);
+}
+
 async function boot() {
   try {
     if (isBrowserPreview()) {
@@ -633,6 +696,7 @@ async function boot() {
     state.loading = false;
     render();
   }
+  startAutoScan();
 }
 
 boot();

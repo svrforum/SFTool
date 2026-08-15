@@ -119,14 +119,42 @@ impl RawWriter for WindowsRawWriter {
         // 2-3. 쓰기용 핸들. **잠금이 열기의 일부이고, 실패하면 여기서 끝난다.**
         //      잠기지 않은 물리 핸들로 쓰면 커널이 거부한다.
         let handle = ioctl::open_physical(disk.number, true, true)?;
+
+        // 2-4. 파티션 테이블 자리를 실제로 0 으로 덮는다. **볼륨을 잠그기 전에.**
+        //
+        // 이 순서가 핵심이다. 이미 로더가 써진 USB 에 다시 쓰면
+        // "오프셋 8388608(=8MiB) 에서 거부" 가 났다. 그 앞은 어떤 파티션에도
+        // 속하지 않아 써지고, 8MiB 부터는 마운트된 파티션의 섹터라 막힌 것이다.
+        //
+        // `IOCTL_DISK_DELETE_DRIVE_LAYOUT` 은 MBR 서명만 건드려서 GPT 나 리눅스
+        // 파티션을 남긴다. 반면 맨 앞 1MiB 는 MBR·GPT 헤더·GPT 항목이 놓이는
+        // 자리이고 **어떤 볼륨에도 속하지 않으므로**, 볼륨이 마운트된 상태에서도
+        // 쓸 수 있다. 여기를 지우고 재인식시키면 볼륨 자체가 사라진다.
+        //
+        // Rufus 가 볼륨을 하나만 잠그고도 되는 이유가 이것이다 — 그 시점에는
+        // 파티션이 이미 지워져 있다. 지우지 않은 채 잠금만 하나로 줄이면
+        // 나머지 파티션에서 막힌다.
+        {
+            let ss = ioctl::query_sector_size(&handle)? as u64;
+            let total = ioctl::query_length(&handle)?;
+            let head = (1024 * 1024u64).min(total) / ss * ss;
+            if head > 0 {
+                let mut buf = ioctl::AlignedBuf::new(head as usize, (ss as usize).max(4096));
+                buf.as_mut_slice().fill(0);
+                if let Err(e) = ioctl::write_raw(&handle, 0, buf.as_ptr(), head as usize) {
+                    notes.push(format!("파티션 영역 지우기 실패 ({e:?})"));
+                }
+            }
+        }
         if let Err(e) = ioctl::update_properties(&handle) {
             notes.push(format!("레이아웃 갱신 실패 ({e:?})"));
         }
 
-        // 2-4. 남아 있는 볼륨이 있으면 하나만 잠근다.
+        // 2-5. 그래도 남아 있는 볼륨은 **전부** 잠근다.
         //
-        // 2-2 가 성공했다면 볼륨이 없는 것이 정상이고, 그 경우 "어떤 볼륨에도
-        // 속하지 않은 섹터" 조건으로 쓰기가 허용된다. 전부 잠그려 들지 않는다.
+        // 위에서 지웠으면 보통 하나도 남지 않는다. 그래도 윈도우가 다시 마운트하는
+        // 경우가 있어서 남은 것은 빠짐없이 잠근다. 하나만 잠그고 넘어가면
+        // 잠기지 않은 볼륨의 섹터에서 쓰기가 거부된다 — 실제로 그렇게 실패했다.
         let mut locked: Vec<OwnedHandle> = Vec::new();
         for (disk_no, v) in ioctl::enumerate_volumes() {
             if disk_no != disk.number {
@@ -139,7 +167,6 @@ impl RawWriter for WindowsRawWriter {
                         notes.push(format!("{path}: 마운트 해제 실패 ({e:?})"));
                     }
                     locked.push(h);
-                    break; // 하나면 충분하다.
                 }
                 Err(e) => notes.push(format!("{path}: 잠금 실패 ({e:?})")),
             }
@@ -157,7 +184,7 @@ impl RawWriter for WindowsRawWriter {
         let align = (sector_size as usize).max(4096);
         let bounce = ioctl::AlignedBuf::new(BOUNCE_BYTES, align);
 
-        Ok(Box::new(WindowsSession {
+        let session = Box::new(WindowsSession {
             handle: Some(handle),
             _locked: locked,
             total_bytes: observed.size_bytes,
@@ -166,7 +193,9 @@ impl RawWriter for WindowsRawWriter {
             disk_number: disk.number,
             bounce,
             prep_notes,
-        }))
+        });
+
+        Ok(session)
     }
 }
 
