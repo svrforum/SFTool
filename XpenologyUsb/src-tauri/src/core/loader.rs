@@ -111,28 +111,56 @@ pub enum ResolveError {
 
 /// 이 에셋이 USB 에 구울 수 있는 raw 디스크 이미지인가.
 ///
-/// 여기서 걸러야 하는 것들:
+/// 확실히 걸러야 하는 것들:
 /// - `.vmdk.gz` — VMware 가상 디스크다. USB 에 구우면 부팅되지 않는다.
-/// - `-5GB` / `-4GB` 변형 — 용량이 다른 별도 빌드. 기본값으로는 표준판을 쓴다.
 /// - `.ova.zip` / `.vhd.zip` — 가상화용.
-/// - `updateall-*.zip` — 업데이트 꾸러미이지 부팅 이미지가 아니다.
+/// - `updateall-*.zip` — 기존 설치를 갱신하는 꾸러미이지 부팅 이미지가 아니다.
+///   이걸 USB 에 구우면 부팅되지 않으면서 원인도 알기 어렵다.
+/// - `xtcrp` 계열 — m-shell 을 요청했을 때 섞이면 안 된다.
 fn is_target_image(loader: Loader, name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     match loader {
         Loader::MShell => {
             // 접두사는 바뀌므로 조건에 넣지 않는다. 역할을 나타내는 부분만 본다.
-            lower.ends_with(".img.gz")
-                && lower.contains("m-shell")
-                && !lower.contains("vmdk")
-                // 용량 변형 제외 (표준판만)
-                && !lower.contains("-5gb")
-                && !lower.contains("-4gb")
+            lower.ends_with(".img.gz") && lower.contains("m-shell") && !lower.contains("vmdk")
         }
         Loader::Rr => {
             // rr-<tag>.img.zip. ova/vhd/updateall 은 제외된다.
             lower.starts_with("rr-") && lower.ends_with(".img.zip")
         }
     }
+}
+
+/// 같은 릴리스 안에 후보가 여러 개일 때의 우선순위. 숫자가 작을수록 먼저다.
+///
+/// m-shell 은 릴리스마다 용량 변형을 함께 올린다. 실사용 통계상 `-5GB` 쪽이
+/// 표준판보다 더 많이 받아지고 있어 이쪽을 기본으로 삼는다.
+/// 구버전 릴리스에는 변형이 없거나 `-4GB` 이므로 없으면 표준판으로 내려온다.
+///
+/// `-5GB` 는 압축 해제 시 약 4.98GB 라서 8GB 이상 USB 가 필요하다.
+/// 최소 용량 요구가 이미 8GB(`safety::MIN_USB_BYTES`)이므로 추가 제약은 생기지 않는다.
+fn preference(loader: Loader, name: &str) -> u8 {
+    let lower = name.to_ascii_lowercase();
+    match loader {
+        Loader::MShell => {
+            if lower.contains("-5gb") {
+                0
+            } else if lower.contains("-4gb") {
+                2
+            } else {
+                1
+            }
+        }
+        Loader::Rr => 0,
+    }
+}
+
+/// 릴리스 하나에서 쓸 이미지를 고른다. 후보가 없으면 None.
+fn select_asset(loader: Loader, assets: &[Asset]) -> Option<&Asset> {
+    assets
+        .iter()
+        .filter(|a| is_target_image(loader, &a.name))
+        .min_by_key(|a| (preference(loader, &a.name), a.name.clone()))
 }
 
 /// 체크섬 에셋인가.
@@ -154,11 +182,7 @@ pub fn resolve(loader: Loader, releases: &[Release]) -> Result<ResolvedImage, Re
         if release.draft || release.prerelease {
             continue;
         }
-        let Some(image) = release
-            .assets
-            .iter()
-            .find(|a| is_target_image(loader, &a.name))
-        else {
+        let Some(image) = select_asset(loader, &release.assets) else {
             // 에셋 없는 릴리스. 다음 것으로 넘어간다.
             continue;
         };
@@ -232,11 +256,16 @@ mod tests {
 
     // --- 접두사 변경에 견디는가 (이 프로그램의 존재 이유 중 하나) ---
 
+    // 이 두 테스트의 목적은 **접두사가 바뀌어도 찾아내는가**이지 변형 선택이 아니다.
+    // 변형 우선순위는 별도 테스트가 담당한다.
+
     #[test]
     fn resolves_new_alpine_prefix() {
         let rs = vec![release("v1.4.2.8", mshell_assets("v1.4.2.8", "alpine-redpill"))];
         let got = resolve(Loader::MShell, &rs).unwrap();
-        assert_eq!(got.asset_name, "alpine-redpill.v1.4.2.8.m-shell.img.gz");
+        assert!(got.asset_name.starts_with("alpine-redpill."));
+        assert!(got.asset_name.contains("m-shell"));
+        assert!(got.asset_name.ends_with(".img.gz"));
     }
 
     #[test]
@@ -247,7 +276,9 @@ mod tests {
             mshell_assets("v1.3.1.1", "tinycore-redpill"),
         )];
         let got = resolve(Loader::MShell, &rs).unwrap();
-        assert_eq!(got.asset_name, "tinycore-redpill.v1.3.1.1.m-shell.img.gz");
+        assert!(got.asset_name.starts_with("tinycore-redpill."));
+        assert!(got.asset_name.contains("m-shell"));
+        assert!(got.asset_name.ends_with(".img.gz"));
     }
 
     #[test]
@@ -269,10 +300,39 @@ mod tests {
     }
 
     #[test]
-    fn never_picks_capacity_variant() {
+    fn prefers_5gb_variant_when_available() {
+        // 실사용 통계상 -5GB 쪽이 더 많이 받아진다 (v1.4.2.8 기준 85 vs 58).
         let rs = vec![release("v1.4.2.8", mshell_assets("v1.4.2.8", "alpine-redpill"))];
         let got = resolve(Loader::MShell, &rs).unwrap();
-        assert!(!got.asset_name.contains("-5GB"));
+        assert_eq!(got.asset_name, "alpine-redpill.v1.4.2.8.m-shell-5GB.img.gz");
+    }
+
+    #[test]
+    fn falls_back_to_standard_when_no_5gb_variant() {
+        // 변형을 올리지 않던 구버전 릴리스.
+        let rs = vec![release(
+            "v1.2.5.0",
+            vec![
+                asset("tinycore-redpill.v1.2.5.0.m-shell.img.gz", 500_000_000),
+                asset("tinycore-redpill.v1.2.5.0.m-shell.vmdk.gz", 500_000_000),
+            ],
+        )];
+        let got = resolve(Loader::MShell, &rs).unwrap();
+        assert_eq!(got.asset_name, "tinycore-redpill.v1.2.5.0.m-shell.img.gz");
+    }
+
+    #[test]
+    fn prefers_standard_over_old_4gb_naming() {
+        // 용량 접미사가 -4GB 이던 시절. 5GB 가 없으면 표준판이 4GB 판보다 낫다.
+        let rs = vec![release(
+            "v1.3.0.0",
+            vec![
+                asset("tinycore-redpill.v1.3.0.0.m-shell-4GB.img.gz", 500_000_000),
+                asset("tinycore-redpill.v1.3.0.0.m-shell.img.gz", 500_000_000),
+            ],
+        )];
+        let got = resolve(Loader::MShell, &rs).unwrap();
+        assert_eq!(got.asset_name, "tinycore-redpill.v1.3.0.0.m-shell.img.gz");
     }
 
     #[test]
