@@ -1,116 +1,346 @@
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
+/*
+ * Toss / Apple 계열 — 여백을 넉넉히 두고, 화면당 결정 하나, 하단에 CTA 하나.
+ * 파괴적인 작업이라 3단계에서만 색으로 경고한다. 그 전까지는 조용해야
+ * 경고가 실제로 눈에 띈다.
+ */
 
-.logo.typescript:hover {
-  filter: drop-shadow(0 0 2em #2d79c7);
-}
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
+  --bg: #ffffff;
+  --fg: #191f28;
+  --fg-sub: #8b95a1;
+  --fg-mute: #b0b8c1;
+  --line: #e5e8eb;
+  --line-strong: #d1d6db;
+  --accent: #3182f6;
+  --accent-weak: #f2f7ff;
+  --danger: #f04452;
+  --danger-weak: #fff5f6;
+  --surface: #f9fafb;
+  --radius: 14px;
+  --radius-sm: 10px;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+  :root:not([data-theme='light']) {
+    --bg: #17171c;
+    --fg: #f2f4f6;
+    --fg-sub: #8b95a1;
+    --fg-mute: #6b7684;
+    --line: #2b2b32;
+    --line-strong: #3a3a43;
+    --accent: #4593fc;
+    --accent-weak: #1b2537;
+    --danger: #ff6b78;
+    --danger-weak: #2a1a1d;
+    --surface: #1f1f25;
   }
+}
 
-  a:hover {
-    color: #24c8db;
-  }
+* {
+  box-sizing: border-box;
+}
 
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'Malgun Gothic', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-size: 15px;
+  line-height: 1.5;
+  user-select: none;
+  overflow: hidden;
+}
+
+#app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  max-width: 460px;
+  margin: 0 auto;
+  padding: 0 28px;
+}
+
+/* 개발용 가짜 데이터 배너 — 실제 동작으로 착각하지 않도록 */
+.sim-banner {
+  flex: none;
+  margin: 10px -28px 0;
+  padding: 7px 28px;
+  background: #fff8e6;
+  color: #8a6d1f;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  letter-spacing: -0.2px;
+}
+
+/* 진행 막대 */
+.steps {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  padding: 20px 0 0;
+}
+
+.seg {
+  height: 3px;
+  flex: 1;
+  border-radius: 2px;
+  background: var(--line);
+  transition: background 0.35s ease;
+}
+
+.seg.on {
+  background: var(--accent);
+}
+
+/* 본문 */
+main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding-top: 28px;
+  min-height: 0;
+}
+
+.eyebrow {
+  font-size: 12px;
+  color: var(--fg-mute);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+h1 {
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.7px;
+  line-height: 1.34;
+  margin: 0;
+}
+
+h1.danger {
+  color: var(--danger);
+}
+
+.lead {
+  color: var(--fg-sub);
+  font-size: 14px;
+  margin: 10px 0 0;
+  letter-spacing: -0.2px;
+}
+
+.list {
+  margin-top: 22px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+  margin-right: -8px;
+  padding-right: 8px;
+}
+
+/* 선택 카드 */
+.item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 15px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  margin-bottom: 9px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.item:hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+
+.item[aria-selected='true'] {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+}
+
+.item:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.item .body {
+  flex: 1;
+  min-width: 0;
+}
+
+.item .title {
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.item .sub {
+  color: var(--fg-sub);
+  font-size: 13px;
+  margin-top: 3px;
+}
+
+.item .sub.warn {
+  color: var(--danger);
+}
+
+.badge {
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  letter-spacing: -0.1px;
+}
+
+.radio {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-strong);
+}
+
+.item[aria-selected='true'] .radio {
+  border: 6px solid var(--accent);
+}
+
+/* 경고 화면의 대상 요약 */
+.target {
+  margin-top: 22px;
+  padding: 16px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-weak);
+  border: 1px solid var(--danger);
+}
+
+.target .name {
+  font-weight: 700;
+  letter-spacing: -0.3px;
+}
+
+.target .meta {
+  color: var(--fg-sub);
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.note {
+  margin-top: 16px;
+  color: var(--fg-sub);
+  font-size: 13px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+/* 하단 버튼 */
+footer {
+  flex: none;
+  padding: 16px 0 24px;
+  display: flex;
+  gap: 10px;
+}
+
+button.cta {
+  flex: 1;
+  padding: 15px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: -0.3px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+button.cta:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+button.cta:disabled {
+  background: var(--line);
+  color: var(--fg-mute);
+  cursor: not-allowed;
+}
+
+button.cta.danger {
+  background: var(--danger);
+}
+
+button.ghost {
+  flex: none;
+  padding: 15px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-sub);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.ghost:hover {
+  border-color: var(--line-strong);
+}
+
+/* 빈 목록 */
+.empty {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--fg-sub);
+  font-size: 14px;
+}
+
+.empty .hint {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--fg-mute);
+}
+
+/* 언어 전환 */
+.lang {
+  position: fixed;
+  top: 14px;
+  right: 16px;
+  display: flex;
+  gap: 2px;
+}
+
+.lang button {
+  border: 0;
+  background: transparent;
+  color: var(--fg-mute);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.lang button[aria-pressed='true'] {
+  color: var(--fg);
+  background: var(--surface);
 }
