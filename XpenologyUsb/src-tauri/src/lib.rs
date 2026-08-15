@@ -10,6 +10,7 @@
 //!   가짜 구현으로 대체하면 실제 하드웨어 없이 전체 흐름을 테스트할 수 있다.
 
 pub mod core;
+pub mod device;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

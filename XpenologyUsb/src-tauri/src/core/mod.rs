@@ -7,4 +7,5 @@
 
 pub mod loader;
 pub mod model;
+pub mod progress;
 pub mod safety;
