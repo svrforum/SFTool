@@ -26,12 +26,6 @@ const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 /// 그래도 안 되면 FILE_SHARE_WRITE 를 허용해 본다.
 const SHARE_WRITE_AFTER: u32 = LOCK_RETRIES / 3;
 
-/// 장치 끝에서 지울 크기.
-///
-/// 이미지(3.0~3.8GB)가 USB 보다 작으면 장치 끝의 옛 GPT 백업 헤더가 그대로 남는다.
-/// 그러면 Windows 가 그걸 보고 지워진 파티션 테이블을 되살린다.
-const TAIL_ZERO_BYTES: u64 = 1024 * 1024;
-
 /// 정렬된 반송 버퍼 크기. 한 번에 이보다 큰 쓰기는 나눠서 보낸다.
 const BOUNCE_BYTES: usize = 8 * 1024 * 1024;
 

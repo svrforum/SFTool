@@ -143,6 +143,7 @@ pub struct FakeSession {
     sector_size: u32,
     data: Arc<Mutex<Vec<u8>>>,
     finished: Arc<Mutex<bool>>,
+    corrupt_after: Option<u64>,
 }
 
 impl WriteSession for FakeSession {
@@ -160,7 +161,7 @@ impl WriteSession for FakeSession {
         // 실제 장치가 강제하는 규칙을 가짜에서도 그대로 강제한다.
         // 그래야 정렬 버그가 실물에서 처음 드러나지 않는다.
         let ss = self.sector_size as u64;
-        if offset % ss != 0 || buf.len() as u64 % ss != 0 {
+        if !offset.is_multiple_of(ss) || !(buf.len() as u64).is_multiple_of(ss) {
             return Err(DeviceError::Io {
                 code: 87,
                 message: "정렬되지 않은 쓰기 (길이와 오프셋은 섹터 배수여야 함)".into(),
@@ -173,6 +174,18 @@ impl WriteSession for FakeSession {
                 code: 112,
                 message: "장치 끝을 넘어선 쓰기".into(),
             });
+        }
+        // 불량 장치 흉내: 지정 지점 이후는 성공을 보고하되 저장하지 않는다.
+        // 한 번의 쓰기가 그 지점을 걸치는 경우도 있으므로 요청 안에서 잘라낸다.
+        if let Some(limit) = self.corrupt_after {
+            if offset >= limit {
+                return Ok(());
+            }
+            let allowed = (limit - offset) as usize;
+            if allowed < buf.len() {
+                d[offset as usize..offset as usize + allowed].copy_from_slice(&buf[..allowed]);
+                return Ok(());
+            }
         }
         d[offset as usize..end].copy_from_slice(buf);
         Ok(())
@@ -213,6 +226,12 @@ pub struct FakeWriter {
     finished: Arc<Mutex<bool>>,
     /// 열 때 실제로 관측되는 장치. 지정하면 TOCTOU 상황을 흉내낼 수 있다.
     observed_override: Option<DiskInfo>,
+    /// 이 오프셋 이후의 쓰기를 조용히 버린다.
+    ///
+    /// 불량 USB 를 흉내내기 위한 것이다. 싸구려 USB 는 쓰기가 성공했다고
+    /// 보고하고도 실제로는 저장하지 않는 경우가 있어서, 검증이 그것을
+    /// 잡아내는지 시험하려면 이런 장치가 필요하다.
+    corrupt_after: Option<u64>,
 }
 
 impl FakeWriter {
@@ -222,12 +241,19 @@ impl FakeWriter {
             storage: Arc::new(Mutex::new(vec![0xAA; capacity])),
             finished: Arc::new(Mutex::new(false)),
             observed_override: None,
+            corrupt_after: None,
         }
     }
 
     /// 열었을 때 다른 장치가 관측되는 상황을 만든다 (디스크 번호 재사용 재현).
     pub fn with_observed(mut self, observed: DiskInfo) -> Self {
         self.observed_override = Some(observed);
+        self
+    }
+
+    /// 지정 오프셋 이후의 쓰기를 삼키는 불량 장치로 만든다.
+    pub fn corrupting_after(mut self, offset: u64) -> Self {
+        self.corrupt_after = Some(offset);
         self
     }
 
@@ -252,6 +278,7 @@ impl RawWriter for FakeWriter {
             sector_size: self.sector_size,
             data: Arc::clone(&self.storage),
             finished: Arc::clone(&self.finished),
+            corrupt_after: self.corrupt_after,
         }))
     }
 }
