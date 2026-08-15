@@ -118,8 +118,9 @@ jobs:
           New-VHD -Path $path -SizeBytes 12GB -Dynamic | Out-Null
           $disk = Mount-VHD -Path $path -Passthru | Get-Disk
           Initialize-Disk -Number $disk.Number -PartitionStyle MBR -Confirm:$false
-          Write-Host "가상 디스크 번호: $($disk.Number)"
-          if ($disk.Number -eq 0) { throw "디스크 0 이 잡혔다. 중단한다." }
+          Write-Host "Virtual disk number: $($disk.Number)"
+          # Guard: never let the test target disk 0.
+          if ($disk.Number -eq 0) { throw "Got disk 0. Refusing to continue." }
           "disk=$($disk.Number)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
