@@ -1,0 +1,78 @@
+name: XpenologyUsb CI
+
+# 이 프로젝트는 Linux 에서 개발되지만 대상은 Windows 다.
+# 그래서 CI 가 하는 일이 두 가지로 나뉜다:
+#   - Linux: 순수 로직 테스트. 빠르고 대부분의 회귀를 여기서 잡는다.
+#   - Windows: 실제 대상 플랫폼에서 컴파일과 테스트가 되는지 확인한다.
+#     Win32 인터롭 코드는 여기서만 컴파일된다.
+#
+# 실제 USB 에 쓰는 동작은 어느 쪽에서도 검증되지 않는다. 러너에 USB 가 없다.
+# 그 부분은 실물 장비에서 수동으로 확인해야 한다.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'XpenologyUsb/**'
+      - '.github/workflows/xpenologyusb-ci.yml'
+  pull_request:
+    paths:
+      - 'XpenologyUsb/**'
+      - '.github/workflows/xpenologyusb-ci.yml'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: XpenologyUsb
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: XpenologyUsb/src-tauri
+
+      # Tauri 의 Linux 백엔드가 요구하는 시스템 라이브러리.
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev
+        working-directory: .
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: XpenologyUsb/package-lock.json
+
+      - run: npm ci
+
+      # 프런트엔드가 먼저 빌드돼야 Tauri 가 dist 를 찾는다.
+      - run: npm run build
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+        working-directory: XpenologyUsb/src-tauri
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: XpenologyUsb/src-tauri
+
+      - name: Test
+        run: cargo test --all-targets
+        working-directory: XpenologyUsb/src-tauri

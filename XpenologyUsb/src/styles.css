@@ -319,13 +319,15 @@ button.ghost:hover {
   color: var(--fg-mute);
 }
 
-/* 언어 전환 */
+/* 언어 전환.
+   흐름 안에 둔다. fixed 로 띄우면 개발용 배너와 겹친다. */
 .lang {
-  position: fixed;
-  top: 14px;
-  right: 16px;
+  flex: none;
   display: flex;
   gap: 2px;
+  justify-content: flex-end;
+  padding-top: 12px;
+  margin-bottom: -6px;
 }
 
 .lang button {

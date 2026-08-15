@@ -185,7 +185,8 @@ function render() {
     foot = `<button class="cta" data-go="1">${esc(t('done'))}</button>`;
   }
 
-  app.innerHTML = `${lang}${banner}${body}<footer>${foot}</footer>`;
+  // 배너가 맨 위, 그 아래 언어 전환. 순서가 겹침을 막는다.
+  app.innerHTML = `${banner}${lang}${body}<footer>${foot}</footer>`;
 }
 
 app.addEventListener('click', (e) => {
@@ -204,10 +205,59 @@ app.addEventListener('click', (e) => {
   render();
 });
 
+/**
+ * Tauri 밖(그냥 브라우저)에서 열렸는가.
+ *
+ * UI 를 다듬을 때 앱을 매번 다시 빌드하지 않고 `npm run dev` 로 브라우저에서
+ * 확인하기 위한 것이다. Tauri 안에서는 항상 false 이므로 배포물에는 영향이 없다.
+ */
+function isBrowserPreview(): boolean {
+  return !('__TAURI_INTERNALS__' in window);
+}
+
+/** 브라우저 미리보기용 표본. Rust 쪽 FakeEnumerator 와 같은 장치들. */
+const previewDisks: DiskEntry[] = [
+  {
+    number: 2,
+    name: 'SanDisk Ultra USB 3.0',
+    size_bytes: 30_752_000_000,
+    size_label: '30.8 GB',
+    drive_letters: ['E:'],
+    ready: true,
+    blocked_reason: null,
+    blocked_detail: null,
+  },
+  {
+    number: 3,
+    name: 'Samsung Flash Drive FIT',
+    size_bytes: 64_055_500_800,
+    size_label: '64.1 GB',
+    drive_letters: [],
+    ready: true,
+    blocked_reason: null,
+    blocked_detail: null,
+  },
+  {
+    number: 4,
+    name: 'Generic Flash Disk',
+    size_bytes: 4_004_511_744,
+    size_label: '4.00 GB',
+    drive_letters: ['F:'],
+    ready: false,
+    blocked_reason: 'too_small_for_any_image',
+    blocked_detail: '8.00 GB',
+  },
+];
+
 async function boot() {
   try {
-    state.simulated = await invoke<boolean>('is_simulated');
-    state.disks = await invoke<DiskEntry[]>('list_disks');
+    if (isBrowserPreview()) {
+      state.simulated = true;
+      state.disks = previewDisks;
+    } else {
+      state.simulated = await invoke<boolean>('is_simulated');
+      state.disks = await invoke<DiskEntry[]>('list_disks');
+    }
     // 선택 가능한 것이 하나뿐이면 미리 골라둔다. 흔한 경우라 클릭을 아낀다.
     const ready = state.disks.filter((d) => d.ready);
     if (ready.length === 1) state.selectedDisk = ready[0].number;

@@ -1,0 +1,76 @@
+name: XpenologyUsb Release
+
+# 태그를 밀면 Windows 러너에서 빌드해 Release 에 .exe 를 첨부한다.
+#
+# 저장소가 여러 도구를 담으므로 태그에 도구 이름을 붙인다:
+#   git tag xpenologyusb-v0.1.0 && git push origin xpenologyusb-v0.1.0
+#
+# 개발 환경이 Linux 라 로컬에서는 Windows 산출물을 만들 수 없다.
+# 여기가 배포 가능한 바이너리가 만들어지는 유일한 곳이다.
+
+on:
+  push:
+    tags:
+      - 'xpenologyusb-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '릴리스 버전 (예: 0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Windows executable
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: XpenologyUsb/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: XpenologyUsb/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: XpenologyUsb
+
+      # 릴리스로 나가는 것이므로 테스트를 통과하지 못하면 여기서 멈춘다.
+      - name: Test
+        run: cargo test --all-targets
+        working-directory: XpenologyUsb/src-tauri
+
+      - name: Build
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: XpenologyUsb
+          tagName: ${{ github.ref_name }}
+          releaseName: Xpenology USB __VERSION__
+          releaseBody: |
+            Xpenology 부트로더(m-shell / RR)를 USB에 굽는 프로그램입니다.
+
+            ### 사용법
+            1. 아래 `.exe` 를 받아 실행합니다 (관리자 권한이 필요합니다)
+            2. USB를 고르고, 로더를 고르고, 확인합니다
+            3. 완료되면 그 USB로 부팅한 뒤 **로더 화면에서 시놀로지 모델을 선택**합니다
+
+            ### 주의
+            - 선택한 USB의 **모든 데이터가 지워집니다**
+            - 쓰기가 끝나면 윈도우가 "디스크를 포맷하세요" 라고 물어볼 수 있습니다.
+              정상이며 **취소**를 누르세요
+            - 8GB 이상 USB가 필요합니다
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: false
