@@ -17,15 +17,14 @@ use windows::Win32::Storage::FileSystem::{
     CreateFileW, DefineDosDeviceW, DeleteVolumeMountPointW, FindFirstVolumeW, FindNextVolumeW,
     FindVolumeClose, FlushFileBuffers, GetVolumeInformationW, GetVolumePathNamesForVolumeNameW,
     ReadFile, SetFilePointerEx, WriteFile, DDD_REMOVE_DEFINITION, FILE_ATTRIBUTE_NORMAL,
-    FILE_BEGIN, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, OPEN_EXISTING, STORAGE_BUS_TYPE,
+    FILE_BEGIN, FILE_SHARE_READ, FILE_SHARE_WRITE, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+    OPEN_EXISTING, STORAGE_BUS_TYPE,
 };
 use windows::Win32::System::Ioctl::{
-    PropertyStandardQuery, StorageDeviceProperty, CREATE_DISK, DISK_GEOMETRY_EX,
-    FSCTL_ALLOW_EXTENDED_DASD_IO, FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, FSCTL_UNLOCK_VOLUME,
-    GET_LENGTH_INFORMATION, IOCTL_DISK_CREATE_DISK, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-    IOCTL_DISK_GET_LENGTH_INFO, IOCTL_DISK_UPDATE_PROPERTIES, IOCTL_STORAGE_EJECT_MEDIA,
-    IOCTL_STORAGE_MEDIA_REMOVAL, IOCTL_STORAGE_QUERY_PROPERTY, PARTITION_STYLE_RAW,
+    PropertyStandardQuery, StorageDeviceProperty, DISK_GEOMETRY_EX, FSCTL_ALLOW_EXTENDED_DASD_IO,
+    FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, FSCTL_UNLOCK_VOLUME, GET_LENGTH_INFORMATION,
+    IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_DISK_UPDATE_PROPERTIES,
+    IOCTL_STORAGE_EJECT_MEDIA, IOCTL_STORAGE_MEDIA_REMOVAL, IOCTL_STORAGE_QUERY_PROPERTY,
     PREVENT_MEDIA_REMOVAL, STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY, VOLUME_DISK_EXTENTS,
 };
 use windows::Win32::System::IO::DeviceIoControl;
@@ -139,120 +138,138 @@ pub fn open_physical_drive_for_query(number: u32) -> Result<OwnedHandle, DeviceE
     Err(last_error_in("물리 디스크 열기(조회)"))
 }
 
-/// 쓰기용으로 열 때 시도하는 조합.
-///
-/// 첫 번째가 이상적이고, 뒤로 갈수록 요구를 낮춘다. 실패하면 다음을 시도하되
-/// **어떤 조합이 어떤 오류로 실패했는지 전부 기록**한다. 한 조합만 시도하고
-/// "Win32 오류 87" 만 남기면 다음에 무엇을 바꿔야 하는지 알 수 없다.
-const WRITE_OPEN_ATTEMPTS: &[(&str, u32, u32)] = &[
-    // 이상적: 캐시 우회 + 즉시 기록.
-    (
-        "GENERIC_READ|WRITE + NO_BUFFERING|WRITE_THROUGH",
-        GENERIC_RW,
-        FLAG_NO_BUF | FLAG_WT,
-    ),
-    // WRITE_THROUGH 를 뺀다. 일부 장치가 이 조합을 거부한다.
-    ("GENERIC_READ|WRITE + NO_BUFFERING", GENERIC_RW, FLAG_NO_BUF),
-    // 캐시 우회를 포기한다. 정렬 요구가 사라지지만 쓰기는 된다.
-    ("GENERIC_READ|WRITE + WRITE_THROUGH", GENERIC_RW, FLAG_WT),
-    // 가장 단순한 형태.
-    ("GENERIC_READ|WRITE (버퍼드)", GENERIC_RW, FLAG_NORMAL),
-    // 읽기 권한까지 거부되는 경우.
-    ("GENERIC_WRITE + NO_BUFFERING", GENERIC_W, FLAG_NO_BUF),
-];
-
 const GENERIC_R: u32 = 0x8000_0000;
 const GENERIC_RW: u32 = 0x8000_0000 | 0x4000_0000;
-const GENERIC_W: u32 = 0x4000_0000;
-const FLAG_NO_BUF: u32 = 0x2000_0000; // FILE_FLAG_NO_BUFFERING
-const FLAG_WT: u32 = 0x8000_0000; // FILE_FLAG_WRITE_THROUGH
-const FLAG_NORMAL: u32 = 0x0000_0080; // FILE_ATTRIBUTE_NORMAL
 
-/// 읽기/쓰기용으로 물리 디스크를 연다. 관리자 권한이 필요하다.
+/// 잠금 재시도 예산. Rufus 와 같은 15초.
+const LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+/// 열기 재시도. 150회 × 100ms.
+const OPEN_RETRIES: u32 = 150;
+const OPEN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+/// 이 횟수를 넘기면 공유 쓰기를 허용해 본다.
+const SHARE_WRITE_AFTER: u32 = OPEN_RETRIES / 3;
+
+/// 장치를 연다. Rufus 의 `GetHandle` 과 같은 모양.
 ///
-/// **`GENERIC_READ`/`GENERIC_WRITE` 를 쓴다.** `FILE_GENERIC_READ`/`FILE_GENERIC_WRITE`
-/// 를 쓰면 안 된다 — 그 마스크에는 `FILE_READ_EA`, `FILE_WRITE_EA`,
-/// `FILE_APPEND_DATA` 처럼 **파일에만 있는 권한**이 들어 있는데,
-/// `\\.\PhysicalDriveN` 은 파일이 아니라 장치 객체라서 그것들을 구현하지 않는다.
-/// 없는 권한을 요구하면 `ERROR_INVALID_PARAMETER(87)` 로 거부된다.
-/// 0.1.3 이 쓰기 단계에서 87 로 실패한 원인이 이것이었다.
+/// **`FILE_FLAG_NO_BUFFERING` 을 쓰지 않는다.** Rufus 는 DD 쓰기에도
+/// `FILE_ATTRIBUTE_NORMAL` 만 쓴다. 캐시 우회는 이 작업에 이득이 없으면서
+/// 버퍼 주소 정렬 요구를 만들어내고, 그게 `ERROR_INVALID_PARAMETER(87)` 의
+/// 원인이 된다. 우리가 겪은 정렬 문제는 전부 여기서 자초한 것이었다.
 ///
-/// `FILE_FLAG_NO_BUFFERING` 은 캐시를 우회해 섹터 단위로 직접 쓰기 위한 것이고,
-/// 정렬 요구도 여기서 나온다. 장치가 거부하면 단계적으로 완화한다.
-pub fn open_physical_drive_for_write(
-    number: u32,
-    share_write: bool,
+/// `lock` 이 참이면 잠금이 **열기의 일부**다. 잠금에 실패하면 핸들을 닫고
+/// 실패를 돌려준다. 잠기지 않은 물리 핸들로 쓰면 커널이 거부하기 때문에,
+/// best-effort 로 넘어가면 그 뒤 쓰기에서 `ERROR_ACCESS_DENIED` 가 난다.
+pub fn get_handle(
+    path: &str,
+    lock: bool,
+    write_access: bool,
+    op: &str,
 ) -> Result<OwnedHandle, DeviceError> {
-    let path = wide(&format!(r"\\.\PhysicalDrive{number}"));
-    let share = if share_write {
-        FILE_SHARE_READ | FILE_SHARE_WRITE
-    } else {
-        FILE_SHARE_READ
-    };
+    let wide_path = wide(path);
+    let access = if write_access { GENERIC_RW } else { GENERIC_R };
+    // Rufus 는 잠글 때 공유 쓰기를 주지 않는다. 둘은 함께 움직인다.
+    let mut share_write = !lock;
 
-    let mut tried: Vec<String> = Vec::new();
-    for (label, access, flags) in WRITE_OPEN_ATTEMPTS {
-        // 안전성: path 는 널 종료된 UTF-16 이고 호출 동안 살아 있다.
+    let mut last = DeviceError::Locked;
+    for attempt in 0..OPEN_RETRIES {
+        let share = if share_write {
+            FILE_SHARE_READ | FILE_SHARE_WRITE
+        } else {
+            FILE_SHARE_READ
+        };
+
+        // 안전성: wide_path 는 널 종료된 UTF-16 이고 호출 동안 살아 있다.
         let r = unsafe {
             CreateFileW(
-                PCWSTR(path.as_ptr()),
-                *access,
+                PCWSTR(wide_path.as_ptr()),
+                access,
                 share,
                 None,
                 OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(*flags),
+                FILE_ATTRIBUTE_NORMAL,
                 None,
             )
         };
+
         match r {
-            Ok(h) if h != INVALID_HANDLE_VALUE => return Ok(OwnedHandle(h)),
+            Ok(h) if h != INVALID_HANDLE_VALUE => {
+                let handle = OwnedHandle(h);
+                if !lock {
+                    return Ok(handle);
+                }
+                // 경계 검사를 끄고 잠근다. 잠금은 열기의 일부다.
+                let _ = control(&handle, FSCTL_ALLOW_EXTENDED_DASD_IO, "경계 검사 해제");
+                match lock_within(&handle, LOCK_BUDGET) {
+                    Ok(()) => return Ok(handle),
+                    Err(e) => {
+                        // 잠기지 않은 핸들은 쓸모가 없다. 닫고 실패로 돌린다.
+                        drop(handle);
+                        return Err(e);
+                    }
+                }
+            }
             _ => {
                 // 안전성: GetLastError 는 스레드 로컬 값을 읽기만 한다.
                 let code = unsafe { GetLastError() }.0 as i32;
-                // 공유 위반과 접근 거부는 조합 문제가 아니라 타이밍/권한 문제다.
-                // 상위의 재시도 로직이 다루도록 그대로 올린다.
-                if code == 32 {
-                    return Err(DeviceError::Locked);
+                // 기다려서 나아질 수 있는 것에만 재시도한다.
+                if code != 5 && code != 32 {
+                    return Err(last_error_in(op));
                 }
-                if code == 5 {
-                    return Err(DeviceError::WriteDenied);
+                last = if code == 5 {
+                    DeviceError::WriteDenied
+                } else {
+                    DeviceError::Locked
+                };
+                if attempt >= SHARE_WRITE_AFTER {
+                    share_write = true;
                 }
-                tried.push(format!("{label} → {code}{}", explain(code)));
+                std::thread::sleep(OPEN_INTERVAL);
             }
         }
     }
+    Err(last)
+}
 
-    Err(DeviceError::Io {
-        code: 0,
-        message: format!(
-            "물리 디스크 열기(쓰기) 실패. 시도한 조합:\n{}",
-            tried.join("\n")
-        ),
-    })
+/// 예산 안에서 볼륨 잠금을 시도한다. 벽시계 기준이라 재시도 횟수에 의존하지 않는다.
+fn lock_within(h: &OwnedHandle, budget: std::time::Duration) -> Result<(), DeviceError> {
+    let deadline = std::time::Instant::now() + budget;
+    let mut last = DeviceError::Locked;
+    loop {
+        match control(h, FSCTL_LOCK_VOLUME, "볼륨 잠금") {
+            Ok(()) => return Ok(()),
+            Err(e @ (DeviceError::Locked | DeviceError::WriteDenied)) => last = e,
+            Err(DeviceError::Io { code: 32, .. }) => {}
+            // 기다려도 달라지지 않는 오류는 즉시 포기한다.
+            Err(e) => return Err(e),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(last);
+        }
+        std::thread::sleep(OPEN_INTERVAL);
+    }
+}
+
+/// 물리 디스크를 연다.
+pub fn open_physical(number: u32, lock: bool, write: bool) -> Result<OwnedHandle, DeviceError> {
+    get_handle(
+        &format!(r"\\.\PhysicalDrive{number}"),
+        lock,
+        write,
+        if write {
+            "물리 디스크 열기(쓰기)"
+        } else {
+            "물리 디스크 열기(읽기)"
+        },
+    )
 }
 
 /// 볼륨을 연다. 경로 끝의 역슬래시는 반드시 빼야 한다 —
 /// 붙이면 장치가 아니라 파일 시스템 루트가 열린다.
-pub fn open_volume(guid_path_no_trailing: &str) -> Result<OwnedHandle, DeviceError> {
-    let path = wide(guid_path_no_trailing);
-    // 안전성: 위와 동일.
-    let h = unsafe {
-        CreateFileW(
-            PCWSTR(path.as_ptr()),
-            GENERIC_RW,
-            // 볼륨을 열 때 FILE_SHARE_WRITE 는 문서상 필수다.
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )
-    }
-    .map_err(|_| last_error_in("볼륨 열기"))?;
-    if h == INVALID_HANDLE_VALUE {
-        return Err(last_error_in("볼륨 열기"));
-    }
-    Ok(OwnedHandle(h))
+///
+/// **읽기 전용으로 연다.** Rufus 도 그렇게 한다 — 볼륨에 직접 쓰지 않고
+/// 잠그기만 할 것이므로 쓰기 권한이 필요 없고, 요구하지 않는 편이 잠길 확률이 높다.
+pub fn open_volume(guid_path_no_trailing: &str, lock: bool) -> Result<OwnedHandle, DeviceError> {
+    get_handle(guid_path_no_trailing, lock, false, "볼륨 열기")
 }
 
 /// 장치 서술자에서 뽑아낸 값들.
@@ -847,11 +864,6 @@ fn control(h: &OwnedHandle, code: u32, op: &str) -> Result<(), DeviceError> {
         .map_err(|_| last_error_in(op))
 }
 
-/// 경계 검사를 끈다. 볼륨 끝 섹터에 접근하려면 필요하다.
-pub fn allow_extended_dasd_io(h: &OwnedHandle) -> Result<(), DeviceError> {
-    control(h, FSCTL_ALLOW_EXTENDED_DASD_IO, "경계 검사 해제")
-}
-
 /// 이 장치가 쓰기 금지 상태인가.
 ///
 /// `STORAGE_DEVICE_DESCRIPTOR` 에는 쓰기 금지 여부가 없어서, 예전에는
@@ -873,28 +885,6 @@ pub fn is_write_protected(h: &OwnedHandle) -> bool {
 
 /// 볼륨을 잠근다. 열린 파일이 있으면 실패하므로 재시도한다.
 ///
-/// **재시도할 값어치가 있는 오류에만 재시도한다.** 공유 위반은 시간이 지나면
-/// 풀릴 수 있지만 "지원하지 않는 요청" 은 15초를 기다려도 달라지지 않는다.
-pub fn lock_volume_with_retry(
-    h: &OwnedHandle,
-    retries: u32,
-    interval: std::time::Duration,
-) -> Result<(), DeviceError> {
-    let mut last = DeviceError::Locked;
-    for _ in 0..retries {
-        match control(h, FSCTL_LOCK_VOLUME, "볼륨 잠금") {
-            Ok(()) => return Ok(()),
-            Err(e @ (DeviceError::Locked | DeviceError::WriteDenied)) => {
-                last = e;
-                std::thread::sleep(interval);
-            }
-            Err(DeviceError::Io { code: 32, .. }) => std::thread::sleep(interval),
-            Err(e) => return Err(e),
-        }
-    }
-    Err(last)
-}
-
 pub fn dismount_volume(h: &OwnedHandle) -> Result<(), DeviceError> {
     control(h, FSCTL_DISMOUNT_VOLUME, "볼륨 마운트 해제")
 }
@@ -933,30 +923,25 @@ pub fn eject_media(h: &OwnedHandle) -> Result<(), DeviceError> {
     control(h, IOCTL_STORAGE_EJECT_MEDIA, "미디어 꺼내기")
 }
 
-/// 디스크를 RAW 로 초기화한다.
+/// 파티션 테이블을 지운다.
 ///
-/// `IOCTL_DISK_DELETE_DRIVE_LAYOUT` 을 쓰지 않는 이유는 그것이 MBR 전용이라
-/// GPT 백업 헤더를 남기기 때문이다.
-pub fn create_disk_raw(h: &OwnedHandle) -> Result<(), DeviceError> {
-    let cd = CREATE_DISK {
-        PartitionStyle: PARTITION_STYLE_RAW,
-        ..Default::default()
-    };
-    let mut returned = 0u32;
-    // 안전성: cd 는 이 스코프에 살아 있고 크기를 정확히 넘긴다.
-    unsafe {
-        DeviceIoControl(
-            h.raw(),
-            IOCTL_DISK_CREATE_DISK,
-            Some(&cd as *const _ as *const _),
-            std::mem::size_of::<CREATE_DISK>() as u32,
-            None,
-            0,
-            Some(&mut returned),
-            None,
-        )
-    }
-    .map_err(|_| last_error_in("파티션 테이블 초기화(RAW)"))
+/// `IOCTL_DISK_CREATE_DISK` 를 쓰지 않는다. Rufus 는 DD 경로에서
+/// `InitializeDisk`(= CREATE_DISK)를 **건너뛴다** —
+///
+/// ```c
+/// if ((boot_type != BT_IMAGE) || (img_report.is_iso && !write_as_image)) {
+///     if ((!ClearMBRGPT(...)) || (!InitializeDisk(hPhysicalDrive))) {
+/// ```
+///
+/// DD 모드에서는 이 조건이 거짓이라 실행되지 않는다. 우리는 Rufus 가 의도적으로
+/// 피하는 경로를 쓰고 있었다.
+///
+/// 목적은 "쓰려는 섹터가 마운트된 볼륨에 속하지 않게" 만드는 것뿐이고,
+/// 그 뒤 이미지가 장치 앞부분을 통째로 덮으므로 레이아웃만 지우면 된다.
+pub fn delete_drive_layout(h: &OwnedHandle) -> Result<(), DeviceError> {
+    // IOCTL_DISK_DELETE_DRIVE_LAYOUT
+    const CODE: u32 = 0x0007_C100;
+    control(h, CODE, "파티션 테이블 삭제")
 }
 
 /// 드라이브 문자를 뗀다.

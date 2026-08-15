@@ -10,21 +10,6 @@
 use super::ioctl::{self, OwnedHandle};
 use crate::core::model::{BusType, DiskInfo};
 use crate::device::{DeviceError, RawWriter, WriteSession};
-use std::thread::sleep;
-use std::time::Duration;
-
-/// 잠금 재시도. 100ms × 150 = 15초.
-///
-/// 잠금은 경합한다. 탐색기가 방금 꽂힌 USB 를 훑고 있거나 백신이 검사 중이면
-/// 첫 시도는 거의 항상 실패한다. 즉시 포기하면 사용자에게는 그냥 고장으로 보인다.
-const LOCK_RETRIES: u32 = 150;
-const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-
-/// 재시도 도중 공유 모드를 완화하는 시점.
-///
-/// 처음에는 배타적으로 열어 다른 프로그램이 끼어들지 못하게 하고,
-/// 그래도 안 되면 FILE_SHARE_WRITE 를 허용해 본다.
-const SHARE_WRITE_AFTER: u32 = LOCK_RETRIES / 3;
 
 /// 정렬된 반송 버퍼 크기. 한 번에 이보다 큰 쓰기는 나눠서 보낸다.
 const BOUNCE_BYTES: usize = 8 * 1024 * 1024;
@@ -97,119 +82,78 @@ impl RawWriter for WindowsRawWriter {
         }
 
         // ── 2. 여기서부터 되돌릴 수 없다 ──────────────────────────────────
-
-        // 드라이브 문자를 뗀다. 붙어 있으면 Windows 가 계속 다시 마운트한다.
-        for v in &disk.volumes {
-            if let Some(letter) = v.drive_letter {
-                ioctl::remove_mount_point(letter);
-            }
-        }
-
-        // 볼륨을 잠근다. 전부 잠그려 들지 않는다 — 하나라도 실패하면 작업이
-        // 무너지는데 Windows 11 은 ESP 를 놓아주지 않는 경우가 있다.
-        // 다만 **어떤 볼륨이 왜 실패했는지는 남긴다.** 나중에 쓰기가 거부되면
-        // 그 원인을 짚을 유일한 단서다.
-        let mut locked: Vec<OwnedHandle> = Vec::new();
-        let mut lock_failures: Vec<String> = Vec::new();
-        for v in &disk.volumes {
-            let path = v.guid_path.trim_end_matches('\\');
-            match ioctl::open_volume(path) {
-                Ok(h) => {
-                    if let Err(e) = ioctl::allow_extended_dasd_io(&h) {
-                        lock_failures.push(format!("{path}: 경계 검사 해제 실패 ({e:?})"));
-                    }
-                    match ioctl::lock_volume_with_retry(&h, LOCK_RETRIES, LOCK_RETRY_INTERVAL) {
-                        Ok(()) => {
-                            if let Err(e) = ioctl::dismount_volume(&h) {
-                                lock_failures.push(format!("{path}: 마운트 해제 실패 ({e:?})"));
-                            }
-                            locked.push(h);
-                        }
-                        Err(e) => lock_failures.push(format!("{path}: 잠금 실패 ({e:?})")),
-                    }
-                }
-                Err(e) => lock_failures.push(format!("{path}: 열기 실패 ({e:?})")),
-            }
-        }
-        if !disk.volumes.is_empty() && locked.is_empty() {
-            return Err(DeviceError::Io {
-                code: 0,
-                message: format!(
-                    "볼륨을 하나도 잠그지 못했습니다:\n{}",
-                    lock_failures.join("\n")
-                ),
-            });
-        }
-        let locked_count = locked.len();
-
-        // 파티션 테이블을 RAW 로. 실패해도 중단하지 않는다 — 어차피 장치
-        // 앞부분을 통째로 덮어쓰고 꼬리까지 지운다.
         //
-        // **성공 여부는 반드시 기록한다.** 성공했다면 볼륨이 사라져서 잠금이
-        // 필요 없고, 실패했다면 그것이 곧 쓰기 거부의 원인이다. `let _ =` 로
-        // 버리면 둘을 구분할 수 없고, 나중에 거부됐을 때 아무 단서도 남지 않는다.
+        // 순서는 Rufus 의 DD 경로를 그대로 따른다. 우리가 쓰던 순서는 정반대였고,
+        // 그래서 쓰기가 거부됐다: 볼륨을 먼저 잠근 뒤 파티션 테이블을 지우면
+        // 재열거 과정에서 그 볼륨 객체들이 사라지고, 잠금은 없어진 것을 가리키게
+        // 된다. 새로 만들어진 볼륨은 마운트돼 있고 잠겨 있지 않으므로 커널이
+        // 쓰기를 막는다.
+        let mut notes: Vec<String> = Vec::new();
+
+        // 2-1. 읽기 전용으로 열고 잠근 뒤, 그 상태에서 드라이브 문자를 뗀다.
         {
-            let prep = open_physical_with_retry(disk.number)?;
-            if let Err(e) = ioctl::create_disk_raw(&prep) {
-                lock_failures.push(format!("파티션 테이블 초기화 실패 ({e:?})"));
+            let ro = ioctl::open_physical(disk.number, true, false)?;
+            for v in &disk.volumes {
+                if let Some(letter) = v.drive_letter {
+                    ioctl::remove_mount_point(letter);
+                }
             }
-            if let Err(e) = ioctl::update_properties(&prep) {
-                lock_failures.push(format!("파티션 테이블 재인식 실패 ({e:?})"));
-            }
-            // 여기서 핸들이 닫힌다. 반드시 닫아야 한다 — 레이아웃 변경으로
-            // 장치가 재열거되면 이 핸들은 ERROR_MEDIA_CHANGED 를 내기 시작한다.
+            drop(ro); // 잠금 해제 후 닫는다. 다음 단계는 핸들이 없어야 한다.
         }
 
-        // ── 3. 쓰기용 핸들 ───────────────────────────────────────────────
-        let handle = open_physical_with_retry(disk.number)?;
-
-        // **물리 핸들 자체를 잠근다.**
+        // 2-2. 파티션 테이블을 지운다.
         //
-        // 빠져 있던 조각이다. Microsoft 의 "Restricted Direct Disk Access" 규칙에서
-        // 디스크 핸들로 쓰기가 허용되는 경우는 (1) 섹터가 어떤 볼륨에도 속하지
-        // 않거나, (2) 속한 볼륨이 **명시적으로 잠겨** 있거나, (3) 그 볼륨이
-        // 마운트돼 있지 않을 때다. 볼륨 핸들만 잠그면 (2)를 만족시키려는
-        // 시도인데, 앞 단계에서 파티션 테이블을 지우고 재인식시키는 순간
-        // 그 볼륨 핸들들은 낡은 객체를 가리키게 된다.
-        //
-        // Rufus 가 DD 쓰기에서 물리 핸들에 직접 FSCTL_LOCK_VOLUME 을 거는 이유가
-        // 이것이다. 실패해도 중단하지 않는다 — Windows 11 은 ESP 가 있는 장치에서
-        // 이 잠금을 거부하는 경우가 있고, 그때는 (1)이나 (3)으로 통과할 수 있다.
-        let mut phys_lock_note = String::new();
-        if let Err(e) = ioctl::allow_extended_dasd_io(&handle) {
-            phys_lock_note = format!("물리 핸들 경계 검사 해제 실패 ({e:?})");
-        }
-        match ioctl::lock_volume_with_retry(&handle, LOCK_RETRIES / 3, LOCK_RETRY_INTERVAL) {
-            Ok(()) => {}
-            Err(e) => {
-                phys_lock_note = format!("물리 핸들 잠금 실패 ({e:?})");
+        // `IOCTL_DISK_CREATE_DISK` 는 쓰지 않는다 — Rufus 는 DD 경로에서
+        // `InitializeDisk` 를 **건너뛴다**. 우리는 그 건너뛰는 경로를 쓰고 있었다.
+        // 여기서는 레이아웃만 지우고, 실제 내용은 곧 이미지가 덮는다.
+        {
+            let h = ioctl::open_physical(disk.number, false, true)?;
+            if let Err(e) = ioctl::delete_drive_layout(&h) {
+                notes.push(format!("파티션 테이블 삭제 실패 ({e:?})"));
+            }
+            if let Err(e) = ioctl::update_properties(&h) {
+                notes.push(format!("파티션 테이블 재인식 실패 ({e:?})"));
             }
         }
-        if !phys_lock_note.is_empty() {
-            lock_failures.push(phys_lock_note);
+
+        // 2-3. 쓰기용 핸들. **잠금이 열기의 일부이고, 실패하면 여기서 끝난다.**
+        //      잠기지 않은 물리 핸들로 쓰면 커널이 거부한다.
+        let handle = ioctl::open_physical(disk.number, true, true)?;
+        if let Err(e) = ioctl::update_properties(&handle) {
+            notes.push(format!("레이아웃 갱신 실패 ({e:?})"));
         }
 
-        // 준비 단계에서 뜻대로 안 된 것들. 쓰기가 거부되면 이 목록이 원인을
-        // 짚는 유일한 단서다.
-        let prep_notes = if lock_failures.is_empty() {
-            format!(
-                "볼륨 {}/{} 잠금, 물리 핸들 잠금, 파티션 테이블 초기화 모두 성공",
-                locked_count,
-                disk.volumes.len()
-            )
+        // 2-4. 남아 있는 볼륨이 있으면 하나만 잠근다.
+        //
+        // 2-2 가 성공했다면 볼륨이 없는 것이 정상이고, 그 경우 "어떤 볼륨에도
+        // 속하지 않은 섹터" 조건으로 쓰기가 허용된다. 전부 잠그려 들지 않는다.
+        let mut locked: Vec<OwnedHandle> = Vec::new();
+        for (disk_no, v) in ioctl::enumerate_volumes() {
+            if disk_no != disk.number {
+                continue;
+            }
+            let path = v.guid_path.trim_end_matches('\\');
+            match ioctl::open_volume(path, true) {
+                Ok(h) => {
+                    if let Err(e) = ioctl::dismount_volume(&h) {
+                        notes.push(format!("{path}: 마운트 해제 실패 ({e:?})"));
+                    }
+                    locked.push(h);
+                    break; // 하나면 충분하다.
+                }
+                Err(e) => notes.push(format!("{path}: 잠금 실패 ({e:?})")),
+            }
+        }
+
+        let prep_notes = if notes.is_empty() {
+            format!("준비 완료 (볼륨 {} 잠금)", locked.len())
         } else {
-            format!(
-                "볼륨 {}/{} 잠금. 준비 중 발생한 문제:\n  {}",
-                locked_count,
-                disk.volumes.len(),
-                lock_failures.join("\n  ")
-            )
+            format!("준비 중 발생한 문제:\n  {}", notes.join("\n  "))
         };
 
         let sector_size = ioctl::query_sector_size(&handle)?;
-
-        // 정렬된 반송 버퍼. 최소 4096 에 맞춘다 — Microsoft 는 물리 섹터 정렬을
-        // 권장하고, 요즘 장치는 논리 512 / 물리 4096(512e)이 흔하다.
+        // 정렬 자체는 이제 필수가 아니다 (NO_BUFFERING 을 쓰지 않는다).
+        // 그래도 섹터 배수로 쓰는 편이 드라이버에 친절해서 유지한다.
         let align = (sector_size as usize).max(4096);
         let bounce = ioctl::AlignedBuf::new(BOUNCE_BYTES, align);
 
@@ -224,25 +168,6 @@ impl RawWriter for WindowsRawWriter {
             prep_notes,
         }))
     }
-}
-
-/// 물리 디스크를 재시도하며 연다.
-///
-/// 공유 위반과 접근 거부에만 재시도한다. 그 외의 오류는 기다린다고 나아지지 않는다.
-fn open_physical_with_retry(number: u32) -> Result<OwnedHandle, DeviceError> {
-    let mut last = DeviceError::Locked;
-    for attempt in 0..LOCK_RETRIES {
-        let share_write = attempt >= SHARE_WRITE_AFTER;
-        match ioctl::open_physical_drive_for_write(number, share_write) {
-            Ok(h) => return Ok(h),
-            Err(e @ (DeviceError::Locked | DeviceError::WriteDenied)) => {
-                last = e;
-                sleep(LOCK_RETRY_INTERVAL);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Err(last)
 }
 
 pub struct WindowsSession {
@@ -415,7 +340,23 @@ impl WindowsSession {
                 // 0 으로 채운다. 할당된 그대로 넘기면 힙 내용이 장치에 실린다.
                 None => self.bounce.as_mut_slice()[..n].fill(0),
             }
-            match ioctl::write_raw(self.hnd(), offset + done as u64, self.bounce.as_ptr(), n) {
+            // Rufus 는 쓰기 실패에 4회까지 재시도하며 사이에 5초를 쉰다.
+            // USB 컨트롤러가 잠깐 응답하지 않는 일이 실제로 있어서,
+            // 첫 실패에 포기하면 멀쩡한 장치를 불량으로 판정하게 된다.
+            let mut result =
+                ioctl::write_raw(self.hnd(), offset + done as u64, self.bounce.as_ptr(), n);
+            let mut tries = 1;
+            while result.is_err() && tries < 4 {
+                // 87 은 크기 문제일 수 있으므로 재시도가 아니라 아래에서 분할로 다룬다.
+                if matches!(result, Err(DeviceError::Io { code: 87, .. })) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                result =
+                    ioctl::write_raw(self.hnd(), offset + done as u64, self.bounce.as_ptr(), n);
+                tries += 1;
+            }
+            match result {
                 Ok(()) => done += n,
                 // 일부 드라이버는 한 번에 받는 전송 크기에 상한이 있고, 넘으면
                 // ERROR_INVALID_PARAMETER 를 돌려준다. 정렬은 이미 맞은 상태이므로
