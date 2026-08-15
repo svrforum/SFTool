@@ -61,8 +61,13 @@ jobs:
           releaseBody: |
             Xpenology 부트로더(m-shell / RR)를 USB에 굽는 프로그램입니다.
 
+            ## 내려받기
+
+            **`XpenologyUsb-portable.exe`** — 이 파일 하나만 받으면 됩니다.
+            설치가 필요 없고, 실행하면 바로 뜹니다.
+
             ### 사용법
-            1. 아래 `.exe` 를 받아 실행합니다 (관리자 권한이 필요합니다)
+            1. 받은 `.exe` 를 실행합니다 (관리자 권한 창이 뜨면 허용해 주세요)
             2. USB를 고르고, 로더를 고르고, 확인합니다
             3. 완료되면 그 USB로 부팅한 뒤 **로더 화면에서 시놀로지 모델을 선택**합니다
 
@@ -71,6 +76,33 @@ jobs:
             - 쓰기가 끝나면 윈도우가 "디스크를 포맷하세요" 라고 물어볼 수 있습니다.
               정상이며 **취소**를 누르세요
             - 8GB 이상 USB가 필요합니다
+            - 서명되지 않은 프로그램이라 SmartScreen 경고가 뜹니다.
+              "추가 정보" → "실행"으로 진행하시면 됩니다
+
+            ### 포터블이 실행되지 않는다면
+
+            이 프로그램은 윈도우에 내장된 WebView2를 사용합니다. Windows 11에는
+            기본으로 있고 Windows 10에도 대부분 있지만, 업데이트를 오래 막아둔
+            기계에는 없을 수 있습니다. 그 경우에만 `-setup.exe` 를 받으세요.
+            WebView2를 자동으로 설치해 줍니다.
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: false
+
+      # 포터블 단일 실행 파일을 올린다.
+      #
+      # tauri-action 이 올리는 것은 설치 프로그램(NSIS / MSI)뿐이다. 이 도구는
+      # 한 번 쓰고 마는 성격이라 설치를 시키는 것이 어울리지 않는다 — Rufus 도
+      # 포터블 단일 exe 다. 릴리스 빌드는 프런트엔드를 바이너리에 넣으므로
+      # 이 파일 하나로 동작한다.
+      - name: Attach portable executable
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          src="XpenologyUsb/src-tauri/target/release/xpenologyusb.exe"
+          test -f "$src" || { echo "포터블 실행 파일을 찾지 못했다: $src"; ls -la "$(dirname "$src")"; exit 1; }
+          cp "$src" "XpenologyUsb-portable.exe"
+          gh release upload "$TAG" "XpenologyUsb-portable.exe" --clobber --repo "$GITHUB_REPOSITORY"
