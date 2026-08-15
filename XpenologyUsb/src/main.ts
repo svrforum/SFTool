@@ -47,6 +47,14 @@ type ProgressEvent = {
 
 type Failure = { code: string; detail?: string };
 
+type RunSummary = {
+  loader: string;
+  tag: string;
+  asset_name: string;
+  bytes_written: number;
+  verified: boolean;
+};
+
 type State = {
   step: Step;
   disks: DiskEntry[];
@@ -57,6 +65,7 @@ type State = {
   loading: boolean;
   progress: ProgressEvent | null;
   failure: Failure | null;
+  summary: RunSummary | null;
 };
 
 const state: State = {
@@ -69,6 +78,7 @@ const state: State = {
   loading: true,
   progress: null,
   failure: null,
+  summary: null,
 };
 
 /** 실행할 단계 순서. 검증은 선택이라 켰을 때만 들어간다. */
@@ -313,6 +323,18 @@ function render() {
     foot = `<button class="ghost" data-go="1">${esc(t('back'))}</button>
             <button class="cta" data-go="3">${esc(t('retry'))}</button>`;
   } else {
+    const sm = state.summary;
+    // 무엇이 얼마나 쓰였는지 보여준다. "성공했습니다" 한 줄만 있으면,
+    // 탐색기에서 USB 내용이 보이지 않는 것을 보고 실패했다고 판단하게 된다.
+    const written = sm
+      ? `<div class="written">${esc(
+          t('done_written', sm.loader, sm.tag, fmtBytes(sm.bytes_written)),
+        )}</div>`
+      : '';
+    const verified =
+      sm?.verified
+        ? `<div class="written ok">✓ ${esc(t('done_verified'))}</div>`
+        : '';
     body = `
       ${segs(4)}
       <main>
@@ -320,6 +342,14 @@ function render() {
           <div class="tick">✓</div>
           <h1>${nl(t('done_title'))}</h1>
           <p class="lead">${esc(t('done_lead'))}</p>
+          ${written}
+          ${verified}
+        </div>
+        <div class="note explain">
+          <span>ℹ</span>
+          <span><b>${esc(t('done_explorer_title'))}</b><br>${esc(
+            t('done_explorer_body'),
+          )}<br><span class="dim">${esc(t('done_replug'))}</span></span>
         </div>
       </main>`;
     foot = `<button class="cta" data-go="1">${esc(t('done'))}</button>`;
@@ -382,7 +412,7 @@ async function startWrite() {
   });
 
   try {
-    await invoke('write_image', {
+    state.summary = await invoke<RunSummary>('write_image', {
       diskNumber: state.selectedDisk,
       loader: state.loader,
       verify: state.verify,
@@ -448,6 +478,13 @@ function simulateRun() {
 
   const tick = () => {
     if (si >= stages.length) {
+      state.summary = {
+        loader: 'm-shell',
+        tag: 'v1.4.2.8',
+        asset_name: 'alpine-redpill.v1.4.2.8.m-shell-5GB.img.gz',
+        bytes_written: 4_978_638_848,
+        verified: state.verify,
+      };
       state.step = 5;
       render();
       return;

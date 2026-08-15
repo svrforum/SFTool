@@ -66,6 +66,12 @@ const ko: Dict = {
   done_title: 'USB가\n준비됐어요',
   done_lead:
     '이 USB로 부팅한 뒤, 로더 화면에서 시놀로지 모델을 선택하시면 됩니다.',
+  done_written: '{0} {1} · {2} 기록',
+  done_verified: '검증 완료 — 쓴 내용과 USB의 내용이 일치합니다',
+  done_explorer_title: '탐색기에서 내용이 안 보이는 것은 정상입니다',
+  done_explorer_body:
+    '로더 이미지는 리눅스 파티션 구조라 윈도우가 대부분 읽지 못합니다. "포맷하세요" 라고 물어봐도 취소를 누르세요. 제대로 됐는지는 이 USB로 부팅해보면 알 수 있습니다.',
+  done_replug: 'USB를 뽑았다 다시 꽂으면 일부 내용이 보일 수 있습니다.',
 
   next: '다음',
   back: '뒤로',
@@ -143,6 +149,12 @@ const en: Dict = {
   done_title: 'Your USB drive\nis ready',
   done_lead:
     'Boot from this drive, then choose your Synology model in the loader screen.',
+  done_written: '{0} {1} · {2} written',
+  done_verified: 'Verified — what was written matches what is on the drive',
+  done_explorer_title: 'Explorer showing nothing is expected',
+  done_explorer_body:
+    'The loader image uses Linux partitions that Windows mostly cannot read. If it offers to format the drive, choose Cancel. The real test is booting from it.',
+  done_replug: 'Unplugging and reconnecting the drive may reveal part of its contents.',
 
   next: 'Next',
   back: 'Back',

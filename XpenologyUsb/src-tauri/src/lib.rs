@@ -97,7 +97,7 @@ async fn write_image(
     disk_number: u32,
     loader: String,
     verify: bool,
-) -> Result<(), String> {
+) -> Result<core::runner::RunSummary, String> {
     let loader = match loader.as_str() {
         "MShell" => Loader::MShell,
         "Rr" => Loader::Rr,

@@ -481,3 +481,30 @@ button.ghost:hover {
   color: var(--fg);
   background: var(--surface);
 }
+
+/* 완료 화면의 기록 요약 */
+.written {
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--fg-sub);
+  font-variant-numeric: tabular-nums;
+}
+
+.written.ok {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 설명 박스 — 경고가 아니라 안내 */
+.note.explain {
+  margin-top: auto;
+  padding: 14px;
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.note.explain .dim {
+  color: var(--fg-mute);
+}

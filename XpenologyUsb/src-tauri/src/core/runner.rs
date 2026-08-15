@@ -100,6 +100,20 @@ impl Cancel for NeverCancel {
     }
 }
 
+/// 작업이 끝난 뒤의 요약.
+///
+/// 완료 화면에서 "무엇이 얼마나 쓰였는지" 를 보여주기 위한 것이다. 이것이 없으면
+/// 사용자는 성공했다는 말만 듣고, 윈도우 탐색기에서 USB 내용이 보이지 않는 것을
+/// 보고 실패했다고 판단하게 된다.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunSummary {
+    pub loader: String,
+    pub tag: String,
+    pub asset_name: String,
+    pub bytes_written: u64,
+    pub verified: bool,
+}
+
 /// 작업 설정.
 pub struct RunConfig {
     pub loader: Loader,
@@ -116,7 +130,7 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
     writer: &dyn RawWriter,
     cancel: &dyn Cancel,
     emit: F,
-) -> Result<(), RunError> {
+) -> Result<RunSummary, RunError> {
     let mut rep = ProgressReporter::new(emit);
 
     // --- 1. 어떤 이미지를 받을지 정한다 -------------------------------------
@@ -300,7 +314,13 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
     rep.begin(Stage::Finishing, None);
     session.finish()?;
     rep.finish();
-    Ok(())
+    Ok(RunSummary {
+        loader: cfg.loader.display_name().to_string(),
+        tag: image.tag.clone(),
+        asset_name: image.asset_name.clone(),
+        bytes_written: offset,
+        verified: cfg.verify,
+    })
 }
 
 #[cfg(test)]
