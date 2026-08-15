@@ -72,6 +72,12 @@ const ko: Dict = {
   done_explorer_body:
     '로더 이미지는 리눅스 파티션 구조라 윈도우가 대부분 읽지 못합니다. "포맷하세요" 라고 물어봐도 취소를 누르세요. 제대로 됐는지는 이 USB로 부팅해보면 알 수 있습니다.',
   done_replug: 'USB를 뽑았다 다시 꽂으면 일부 내용이 보일 수 있습니다.',
+  eject: '안전하게 제거',
+  ejecting: '제거하는 중…',
+  eject_ok: '이제 USB를 뽑으셔도 됩니다',
+  eject_fail: '제거하지 못했습니다',
+  eject_fail_why:
+    '무언가 아직 USB를 사용 중입니다. 탐색기 창을 닫고 다시 눌러보세요. 계속 안 되면 작업 표시줄의 "하드웨어 안전하게 제거"를 이용하시면 됩니다.',
 
   next: '다음',
   back: '뒤로',
@@ -155,6 +161,12 @@ const en: Dict = {
   done_explorer_body:
     'The loader image uses Linux partitions that Windows mostly cannot read. If it offers to format the drive, choose Cancel. The real test is booting from it.',
   done_replug: 'Unplugging and reconnecting the drive may reveal part of its contents.',
+  eject: 'Safely remove',
+  ejecting: 'Removing…',
+  eject_ok: 'You can unplug the drive now',
+  eject_fail: 'Could not remove it',
+  eject_fail_why:
+    'Something is still using the drive. Close any Explorer windows and press it again. If it keeps failing, use "Safely Remove Hardware" from the taskbar.',
 
   next: 'Next',
   back: 'Back',

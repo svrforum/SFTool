@@ -15,10 +15,25 @@
 //! 오히려 이쪽이 강하다 — 플래그는 값이 없거나 틀릴 수 있지만, "C: 를 담고 있는
 //! 디스크 번호"는 커널이 지금 이 순간 답하는 사실이다.
 
+mod eject;
 mod ioctl;
 mod raw;
 
 pub use raw::WindowsRawWriter;
+
+/// USB 를 안전하게 제거한다.
+///
+/// 볼륨 관리자에게 미디어 제거를 허용시킨 뒤 꺼내기를 요청한다.
+/// 실패하면 그 이유를 그대로 올린다 — 대개 무언가 아직 장치를 붙잡고 있다는 뜻이라
+/// 사용자가 탐색기 창을 닫고 다시 시도하면 된다.
+pub fn eject(disk_number: u32) -> Result<(), DeviceError> {
+    // 먼저 볼륨 관리자에게 제거를 허용시킨다. 실패해도 다음 단계를 막지 않는다.
+    if let Ok(h) = ioctl::open_physical(disk_number, false, false) {
+        ioctl::allow_media_removal(&h);
+    }
+    // 실제 안전 제거. USB 스틱은 미디어 꺼내기가 아니라 장치 제거여야 한다.
+    eject::request_eject(disk_number)
+}
 
 use super::{DeviceError, UsbEnumerator};
 use crate::core::model::{BusType, DiskInfo, VolumeInfo};

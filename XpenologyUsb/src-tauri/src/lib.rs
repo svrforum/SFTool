@@ -81,6 +81,23 @@ fn is_simulated() -> bool {
     !cfg!(windows)
 }
 
+/// USB 를 안전하게 제거한다.
+///
+/// 자동으로 하지 않고 버튼으로 둔 이유는, 자동 꺼내기는 실패해도 알 수 없고
+/// 사용자가 다시 시도할 방법도 없기 때문이다. 눌러서 결과를 보는 편이 낫다.
+#[tauri::command]
+fn eject_disk(disk_number: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        device::windows::eject(disk_number).map_err(|e| format!("{e:?}"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = disk_number;
+        Ok(())
+    }
+}
+
 #[tauri::command]
 fn cancel_write(state: tauri::State<'_, AppState>) {
     state.cancel.store(true, Ordering::Relaxed);
@@ -155,7 +172,8 @@ pub fn run() {
             list_disks,
             is_simulated,
             write_image,
-            cancel_write
+            cancel_write,
+            eject_disk
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

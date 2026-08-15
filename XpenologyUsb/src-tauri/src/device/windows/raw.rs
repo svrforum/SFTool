@@ -286,12 +286,10 @@ impl Drop for WindowsSession {
             drop(h);
         }
 
-        // 꺼내기는 실패해도 치명적이지 않다. 이미지는 이미 쓰였고,
-        // 사용자가 직접 안전 제거를 하면 된다.
-        if let Ok(h) = ioctl::open_physical_drive_for_query(disk_number) {
-            ioctl::allow_media_removal(&h);
-            let _ = ioctl::eject_media(&h);
-        }
+        // **여기서 꺼내지 않는다.** 예전에는 자동으로 꺼냈는데, 실패해도
+        // 알 수 없었고 사용자가 제어할 수도 없었다. 꺼내기는 완료 화면의
+        // 버튼으로 옮겼다 — 사용자가 누르고 결과를 확인할 수 있어야 한다.
+        let _ = disk_number;
     }
 }
 

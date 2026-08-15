@@ -66,6 +66,8 @@ type State = {
   progress: ProgressEvent | null;
   failure: Failure | null;
   summary: RunSummary | null;
+  /** 안전 제거 상태. null 이면 아직 누르지 않은 것. */
+  eject: 'busy' | 'ok' | 'fail' | null;
 };
 
 const state: State = {
@@ -79,6 +81,7 @@ const state: State = {
   progress: null,
   failure: null,
   summary: null,
+  eject: null,
 };
 
 /** 실행할 단계 순서. 검증은 선택이라 켰을 때만 들어간다. */
@@ -168,6 +171,23 @@ function loaderItem(id: LoaderId, name: string, sub: string, badge: boolean): st
       </span>
       <span class="radio"></span>
     </button>`;
+}
+
+/** 완료 화면의 안전 제거 영역. */
+function ejectBlock(): string {
+  if (state.eject === 'ok') {
+    return `<div class="written ok">✓ ${esc(t('eject_ok'))}</div>`;
+  }
+  if (state.eject === 'fail') {
+    return `<div class="eject-fail">
+        <b>${esc(t('eject_fail'))}</b><br>${esc(t('eject_fail_why'))}
+        <div><button class="mini" data-eject="1">${esc(t('eject'))}</button></div>
+      </div>`;
+  }
+  const busy = state.eject === 'busy';
+  return `<div><button class="mini" data-eject="1" ${busy ? 'disabled' : ''}>${esc(
+    busy ? t('ejecting') : t('eject'),
+  )}</button></div>`;
 }
 
 function render() {
@@ -344,6 +364,7 @@ function render() {
           <p class="lead">${esc(t('done_lead'))}</p>
           ${written}
           ${verified}
+          ${ejectBlock()}
         </div>
         <div class="note explain">
           <span>ℹ</span>
@@ -365,6 +386,10 @@ app.addEventListener('click', (e) => {
   );
   if (!el) return;
 
+  if (el.dataset.eject) {
+    doEject();
+    return;
+  }
   if (el.dataset.cancel) {
     // 백엔드에 멈추라고 알린다. 화면 전환은 작업이 실제로 끝난 뒤
     // write_image 가 반환하면서 이뤄진다.
@@ -383,6 +408,8 @@ app.addEventListener('click', (e) => {
     if (next === 1) {
       state.progress = null;
       state.failure = null;
+      state.summary = null;
+      state.eject = null;
     }
   }
   render();
@@ -423,6 +450,34 @@ async function startWrite() {
     state.step = 6;
   } finally {
     unlisten();
+  }
+  render();
+}
+
+/**
+ * USB 를 안전하게 제거한다.
+ *
+ * 자동으로 하지 않는다. 자동 꺼내기는 실패해도 사용자가 알 수 없고 다시 시도할
+ * 방법도 없다. 눌러서 결과를 보는 편이 낫다.
+ */
+async function doEject() {
+  if (state.eject === 'busy' || state.selectedDisk == null) return;
+  state.eject = 'busy';
+  render();
+
+  if (isBrowserPreview()) {
+    setTimeout(() => {
+      state.eject = 'ok';
+      render();
+    }, 700);
+    return;
+  }
+
+  try {
+    await invoke('eject_disk', { diskNumber: state.selectedDisk });
+    state.eject = 'ok';
+  } catch {
+    state.eject = 'fail';
   }
   render();
 }

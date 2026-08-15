@@ -508,3 +508,37 @@ button.ghost:hover {
 .note.explain .dim {
   color: var(--fg-mute);
 }
+
+/* 완료 화면의 보조 버튼 */
+button.mini {
+  margin-top: 16px;
+  padding: 10px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.mini:hover:not(:disabled) {
+  background: var(--surface);
+}
+
+button.mini:disabled {
+  color: var(--fg-mute);
+  cursor: default;
+}
+
+.eject-fail {
+  margin-top: 16px;
+  padding: 14px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-weak);
+  border: 1px solid var(--danger);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: left;
+}
