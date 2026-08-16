@@ -18,6 +18,21 @@ use std::io::Read;
 /// 장치에 한 번에 보내는 크기. 섹터 배수로 맞춰 쓴다.
 const CHUNK: usize = 8 * 1024 * 1024;
 
+/// 맨 앞에서 보류했다가 마지막에 쓰는 크기.
+///
+/// 이미지의 첫 부분에는 **그 이미지 자신의 파티션 테이블**이 들어 있다.
+/// 그걸 오프셋 0 에 쓰는 순간 장치에 유효한 파티션 테이블이 생기고, 윈도우가
+/// 그것을 감지해 **쓰는 도중에 볼륨을 마운트한다.** 탐색기가 갑자기 열리는 것이
+/// 그 증상이고, 새로 생긴 볼륨은 잠겨 있지 않으므로 그 섹터에 도달한 순간
+/// 쓰기가 거부된다. 실제로 24MiB 지점에서 그렇게 실패했다.
+///
+/// 준비 단계에서 아무리 지워도 소용이 없다. 우리가 쓰는 내용 자체가 파티션
+/// 테이블이기 때문이다. 그래서 앞부분을 보류했다가 **나머지를 다 쓴 뒤에**
+/// 채운다. 윈도우가 유효한 테이블을 보는 시점에는 이미 끝나 있다.
+///
+/// 1MiB 면 MBR(섹터 0), GPT 헤더(섹터 1), GPT 항목(섹터 2~33)을 모두 덮는다.
+const HOLDBACK: u64 = 1024 * 1024;
+
 /// 장치 끝에서 지울 크기.
 ///
 /// 이미지가 USB 보다 작으면 끝에 남은 옛 GPT 백업 헤더 때문에 Windows 가
@@ -205,6 +220,9 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
     // 여기서 계산해 두지 않으면 이미지를 다시 내려받아야 한다.
     let mut write_hasher = Sha256::new();
 
+    // 이미지 맨 앞을 담아 둘 곳. 마지막에 쓴다.
+    let mut holdback: Vec<u8> = Vec::new();
+
     loop {
         if cancel.is_canceled() {
             return Err(RunError::Canceled);
@@ -221,6 +239,21 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
         }
         if filled == 0 {
             break;
+        }
+
+        // 앞 HOLDBACK 바이트는 지금 쓰지 않고 들고 있는다.
+        if (holdback.len() as u64) < HOLDBACK {
+            let want = (HOLDBACK - holdback.len() as u64) as usize;
+            let take = want.min(filled);
+            holdback.extend_from_slice(&buf[..take]);
+            write_hasher.update(&buf[..take]);
+            offset += take as u64;
+            if take == filled {
+                continue;
+            }
+            // 이 청크의 나머지는 정상적으로 쓴다.
+            buf.copy_within(take..filled, 0);
+            filled -= take;
         }
 
         // 장치에는 섹터 배수로만 쓸 수 있다. 마지막 조각은 올림하고
@@ -253,6 +286,14 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
             padded as u64,
         );
         last_t = now;
+    }
+
+    // 보류해 둔 맨 앞을 이제 쓴다. 여기서 비로소 장치에 유효한 파티션 테이블이
+    // 생기지만, 나머지는 이미 다 쓰인 뒤라 윈도우가 볼륨을 마운트해도 늦다.
+    if !holdback.is_empty() {
+        let padded = holdback.len().div_ceil(sector) * sector;
+        holdback.resize(padded, 0);
+        session.write_at(0, &holdback)?;
     }
 
     // 이미지가 USB 보다 작으면 끝에 옛 GPT 백업 헤더가 남는다.
@@ -403,6 +444,87 @@ mod tests {
         assert_eq!(&written[..payload.len()], &payload[..]);
         // 마무리가 호출돼야 한다. 빠뜨리면 플러시 없이 끝난다.
         assert!(writer.was_finished(), "finish 가 호출되지 않았다");
+    }
+
+    /// 이미지가 보류 크기보다 클 때, 앞부분을 나중에 써도 내용이 정확한지.
+    ///
+    /// 실제 이미지는 GB 단위라 항상 이 경로를 탄다. 다른 테스트들은 전부
+    /// 1MiB 보다 작아서 "전체가 보류되는" 경로만 검증한다.
+    #[test]
+    fn image_larger_than_the_holdback_is_written_in_the_right_order() {
+        // 보류 크기의 세 배 남짓. 경계를 넘나드는 값으로 고른다.
+        let size = (HOLDBACK as usize) * 3 + 12345;
+        let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let io = FakeIo {
+            payload: payload.clone(),
+        };
+        let writer = FakeWriter::new(8 * 1024 * 1024, 512);
+
+        run(
+            RunConfig {
+                loader: Loader::MShell,
+                verify: false,
+            },
+            &usb(),
+            &HashSet::new(),
+            &io,
+            &writer,
+            &NeverCancel,
+            |_| {},
+        )
+        .expect("작업이 성공해야 한다");
+
+        // 보류했던 앞부분이 제자리에 있어야 한다.
+        let written = writer.contents();
+        assert_eq!(
+            &written[..HOLDBACK as usize],
+            &payload[..HOLDBACK as usize],
+            "보류한 앞부분이 잘못 쓰였다"
+        );
+        // 그 뒤도 이어서 정확해야 한다 — 오프셋이 어긋나면 여기서 걸린다.
+        assert_eq!(
+            &written[HOLDBACK as usize..payload.len()],
+            &payload[HOLDBACK as usize..],
+            "보류 이후 데이터의 위치가 어긋났다"
+        );
+    }
+
+    /// 보류한 앞부분은 **나머지를 다 쓴 뒤에** 쓰여야 한다.
+    ///
+    /// 순서가 뒤바뀌면 윈도우가 쓰는 도중에 파티션을 인식해 볼륨을 마운트하고,
+    /// 그 볼륨이 잠기지 않았으므로 이후 쓰기가 거부된다. 실제로 24MiB 지점에서
+    /// 그렇게 실패했다.
+    #[test]
+    fn the_partition_table_is_written_last() {
+        let size = (HOLDBACK as usize) * 2;
+        let payload: Vec<u8> = (0..size).map(|i| (i % 241) as u8).collect();
+        let io = FakeIo {
+            payload: payload.clone(),
+        };
+        let writer = FakeWriter::new(8 * 1024 * 1024, 512);
+        run(
+            RunConfig {
+                loader: Loader::MShell,
+                verify: false,
+            },
+            &usb(),
+            &HashSet::new(),
+            &io,
+            &writer,
+            &NeverCancel,
+            |_| {},
+        )
+        .unwrap();
+
+        let order = writer.write_offsets();
+        let first_write_at_zero = order
+            .iter()
+            .position(|o| *o == 0)
+            .expect("오프셋 0 에 쓴 적이 없다");
+        assert!(
+            first_write_at_zero > 0,
+            "오프셋 0 을 가장 먼저 썼다 — 파티션 테이블이 마지막에 쓰여야 한다"
+        );
     }
 
     #[test]

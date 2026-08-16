@@ -144,6 +144,7 @@ pub struct FakeSession {
     data: Arc<Mutex<Vec<u8>>>,
     finished: Arc<Mutex<bool>>,
     corrupt_after: Option<u64>,
+    offsets: Arc<Mutex<Vec<u64>>>,
 }
 
 impl WriteSession for FakeSession {
@@ -167,6 +168,7 @@ impl WriteSession for FakeSession {
                 message: "정렬되지 않은 쓰기 (길이와 오프셋은 섹터 배수여야 함)".into(),
             });
         }
+        self.offsets.lock().unwrap().push(offset);
         let mut d = self.data.lock().unwrap();
         let end = offset as usize + buf.len();
         if end > d.len() {
@@ -226,6 +228,8 @@ pub struct FakeWriter {
     finished: Arc<Mutex<bool>>,
     /// 열 때 실제로 관측되는 장치. 지정하면 TOCTOU 상황을 흉내낼 수 있다.
     observed_override: Option<DiskInfo>,
+    /// 쓰기가 일어난 오프셋 순서. 순서를 검증하는 테스트가 쓴다.
+    offsets: Arc<Mutex<Vec<u64>>>,
     /// 이 오프셋 이후의 쓰기를 조용히 버린다.
     ///
     /// 불량 USB 를 흉내내기 위한 것이다. 싸구려 USB 는 쓰기가 성공했다고
@@ -242,6 +246,7 @@ impl FakeWriter {
             finished: Arc::new(Mutex::new(false)),
             observed_override: None,
             corrupt_after: None,
+            offsets: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -262,6 +267,11 @@ impl FakeWriter {
         self.storage.lock().unwrap().clone()
     }
 
+    /// 쓰기가 일어난 오프셋을 순서대로. 파티션 테이블을 마지막에 쓰는지 검증한다.
+    pub fn write_offsets(&self) -> Vec<u64> {
+        self.offsets.lock().unwrap().clone()
+    }
+
     /// `finish` 가 호출됐는가. 마무리를 빼먹는 회귀를 잡는다.
     pub fn was_finished(&self) -> bool {
         *self.finished.lock().unwrap()
@@ -279,6 +289,7 @@ impl RawWriter for FakeWriter {
             data: Arc::clone(&self.storage),
             finished: Arc::clone(&self.finished),
             corrupt_after: self.corrupt_after,
+            offsets: Arc::clone(&self.offsets),
         }))
     }
 }
