@@ -44,6 +44,16 @@ pub fn planned_stages(verify: bool) -> Vec<Stage> {
     v
 }
 
+/// 복제의 단계 순서. 굽기와 달리 내려받기와 압축 해제가 없다.
+pub fn clone_stages(verify: bool) -> Vec<Stage> {
+    let mut s = vec![Stage::Analyzing, Stage::Preparing, Stage::Writing];
+    if verify {
+        s.push(Stage::Verifying);
+    }
+    s.push(Stage::Finishing);
+    s
+}
+
 /// 진행 보고를 만들어 내보내는 쪽.
 ///
 /// 단계 전이를 여기로 모아서, 완료 목록을 갱신하는 것을 호출부마다

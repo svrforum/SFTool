@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 /// 작업 단계. UI 의 4단계 화면에서 진행 목록으로 표시된다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Stage {
+    /// 원본 USB 분석 (복제 전용).
+    Analyzing,
     /// 최신 릴리스 확인.
     Resolving,
     /// 내려받기.

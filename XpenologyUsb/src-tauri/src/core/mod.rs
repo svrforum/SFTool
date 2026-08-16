@@ -5,6 +5,7 @@
 //!
 //! Windows 전용 코드는 `crate::device` 에 트레이트 뒤로 격리한다.
 
+pub mod cloner;
 pub mod layout;
 pub mod loader;
 pub mod model;
