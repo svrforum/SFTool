@@ -40,7 +40,53 @@
 
 use xpenologyusb_lib::core::model::{BusType, DiskInfo};
 use xpenologyusb_lib::device::windows::{WindowsRawReader, WindowsRawWriter};
-use xpenologyusb_lib::device::{RawWriter, UsbEnumerator};
+use xpenologyusb_lib::device::{RawReader, RawWriter, UsbEnumerator};
+
+/// 두 버퍼가 처음으로 갈라지는 지점.
+fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
+    match a.iter().zip(b).position(|(x, y)| x != y) {
+        Some(at) => Some(at),
+        None if a.len() != b.len() => Some(a.len().min(b.len())),
+        None => None,
+    }
+}
+
+/// 다르면 **어디가** 다른지 보여주며 실패한다.
+///
+/// 4MiB 짜리 버퍼 둘을 `assert_eq!` 로 비교하면 실패했을 때 벡터를 통째로
+/// 덤프한다. CI 로그가 36MB 가 되어 잘렸고, 정작 어느 오프셋이 다른지는
+/// 끝내 보이지 않았다. 진단이 되지 않는 실패는 없는 것과 비슷하다.
+fn assert_same(actual: &[u8], expected: &[u8], what: &str) {
+    if let Some(at) = first_difference(actual, expected) {
+        let from = at.saturating_sub(16);
+        let to = (at + 16).min(actual.len()).min(expected.len());
+        panic!(
+            "{what}\n  길이: {} vs {}\n  오프셋 {at} 부터 다르다\n  실제 [{from}..{to}] = {:02x?}\n  기대 [{from}..{to}] = {:02x?}",
+            actual.len(),
+            expected.len(),
+            &actual[from..to],
+            &expected[from..to],
+        );
+    }
+}
+
+/// 디스크 앞에서 `len` 바이트를 **건드리지 않고** 읽는다.
+///
+/// 되읽기에 `RawWriter` 를 쓰면 안 된다. `WindowsRawWriter::open` 은 그 안에서
+/// 파티션 테이블을 지우고 **앞 1MiB 를 0 으로 덮는다.** 그걸로 읽으면 방금 쓴
+/// 내용을 스스로 지운 뒤 그 0 을 읽게 된다. 실제로 이 테스트가 처음 그렇게
+/// 실패했다 — 복제는 멀쩡한데 확인 방법이 대상을 파괴하고 있었다.
+fn read_back(disk: &DiskInfo, len: usize, label: &str) -> Vec<u8> {
+    let mut buf = vec![0u8; len];
+    let mut s = WindowsRawReader::new()
+        .open(disk)
+        .unwrap_or_else(|e| panic!("[{label}] 읽기용으로 열지 못했다: {e:?}"));
+    s.read_at(0, &mut buf)
+        .unwrap_or_else(|e| panic!("[{label}] 되읽기 실패: {e:?}"));
+    s.finish()
+        .unwrap_or_else(|e| panic!("[{label}] 마무리 실패: {e:?}"));
+    buf
+}
 
 /// 대상 디스크 번호. 없으면 테스트를 건너뛴다.
 fn target_disk() -> Option<u32> {
@@ -261,16 +307,29 @@ fn clones_one_virtual_disk_onto_another() {
     // 파티션 끝까지만 복사돼야 한다. 6MiB 장치에서 4MiB 다.
     assert_eq!(summary.bytes_copied, 4 * 1024 * 1024);
 
-    // 대상에서 되읽어 원본과 대조한다. verify:true 가 이미 확인했지만,
-    // 그것은 "쓴 것" 과 "장치에 있는 것" 의 비교다. 여기서는 "원본" 과
-    // 비교한다 — 잘못된 범위를 복사했다면 검증은 통과하고 이것은 실패한다.
-    let mut back = vec![0u8; 4 * 1024 * 1024];
-    let mut s = WindowsRawWriter::new()
-        .open(&dst_disk)
-        .expect("되읽기용으로 열지 못했다");
-    s.read_at(0, &mut back).expect("되읽기 실패");
-    assert_eq!(back, image[..4 * 1024 * 1024], "복제본이 원본과 다르다");
-    s.finish().expect("마무리 실패");
+    // 대상과 원본을 **둘 다 읽기 전용으로** 되읽어 대조한다.
+    //
+    // verify:true 가 이미 확인한 것은 "쓴 것" 과 "장치에 있는 것" 의 일치다.
+    // 여기서 보는 것은 다른 질문이다 — 대상이 **원본과 같은가.** 잘못된 범위를
+    // 복사했다면 검증은 통과하고 이 대조가 실패한다.
+    let copied = summary.bytes_copied as usize;
+    let from_target = read_back(&dst_disk, copied, "target");
+    let from_source = read_back(&src_disk, copied, "source");
+
+    // 심어 둔 `image` 버퍼가 아니라 **지금의 원본**과 비교한다.
+    //
+    // 윈도우는 유효한 파티션 테이블이 생기면 MBR 디스크 서명(오프셋 440)이
+    // 0 인 디스크에 서명을 채워 넣는다. 씨앗을 심은 직후의 버퍼는 그래서 이미
+    // 원본이 아니다. 복제본이 같아야 할 대상은 디스크의 현재 내용이다.
+    assert_same(&from_target, &from_source, "복제본이 원본과 다르다");
+
+    // 다만 "둘 다 똑같이 비어 있어도" 통과하면 안 되므로, 첫 섹터를 뺀 나머지가
+    // 심어 둔 내용 그대로인지도 본다. 윈도우가 건드리는 것은 MBR 뿐이다.
+    assert_same(
+        &from_target[512..],
+        &image[512..copied],
+        "복사된 내용이 심어 둔 이미지와 다르다",
+    );
 }
 
 /// 이미 내용이 있는 대상으로 복제한다. 재쓰기 경로.
