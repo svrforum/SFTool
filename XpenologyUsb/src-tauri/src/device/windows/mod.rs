@@ -40,6 +40,7 @@ pub fn eject(disk_number: u32) -> Result<(), DeviceError> {
 use super::{DeviceError, UsbEnumerator};
 use crate::core::model::{BusType, DiskInfo, VolumeInfo};
 use std::collections::HashSet;
+use std::sync::Mutex;
 
 /// 물리 디스크 열거자.
 pub struct WindowsEnumerator {
@@ -48,11 +49,19 @@ pub struct WindowsEnumerator {
     /// Windows 는 디스크 번호를 촘촘하게 배정하지 않으므로 위쪽에 구멍이 있을 수
     /// 있다. 넉넉하게 잡되, 존재하지 않는 번호는 열기 실패로 조용히 건너뛴다.
     max_disks: u32,
+    /// 직전 열거에서 빠진 장치와 그 이유.
+    ///
+    /// `list_disks` 가 `&self` 라서 여기에 담아 둔다. 이 값이 필요한 이유는
+    /// [`UsbEnumerator::skipped`] 에 적어 두었다.
+    skipped: Mutex<Vec<String>>,
 }
 
 impl WindowsEnumerator {
     pub fn new() -> Self {
-        Self { max_disks: 64 }
+        Self {
+            max_disks: 64,
+            skipped: Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -129,12 +138,21 @@ impl UsbEnumerator for WindowsEnumerator {
         // 하나도 못 찾았다면 이유를 오류에 담아 올린다. 빈 목록만 보여주면
         // 사용자는 USB 를 다시 꽂아보는 것 말고 할 수 있는 게 없다.
         if disks.is_empty() && !skipped.is_empty() {
+            *self.skipped.lock().unwrap() = skipped.clone();
             return Err(DeviceError::Io {
                 code: 0,
                 message: format!("디스크를 열거하지 못했습니다:\n{}", skipped.join("\n")),
             });
         }
+        // **일부만 빠진 경우도 남긴다.** 예전에는 목록이 비었을 때만 사유를
+        // 올렸다. 내장 SSD 하나만 제대로 읽히면 목록은 비어 있지 않으므로,
+        // 정작 사용자가 찾는 USB 가 조회 실패로 빠져도 아무 말 없이 사라졌다.
+        *self.skipped.lock().unwrap() = skipped;
         Ok(disks)
+    }
+
+    fn skipped(&self) -> Vec<String> {
+        self.skipped.lock().unwrap().clone()
     }
 
     fn protected_disk_numbers(&self) -> Result<HashSet<u32>, DeviceError> {

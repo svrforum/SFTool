@@ -38,6 +38,7 @@ const ko: Dict = {
   step1_lead: 'USB 저장장치만 표시됩니다. 내장 디스크는 목록에 나오지 않습니다.',
   step1_empty: '연결된 USB가 없습니다',
   step1_empty_hint: 'USB를 꽂으면 자동으로 나타납니다',
+  step1_skipped: '목록에 넣지 못한 장치가 있습니다:',
   refresh: '새로고침',
   refreshing: '찾는 중…',
 
@@ -82,7 +83,15 @@ const ko: Dict = {
   err_media_changed: 'USB가 바뀌었습니다',
   err_media_changed_why: '작업 중에 USB가 분리되었거나 교체되었습니다. 다시 꽂고 처음부터 진행해 주세요.',
   err_identity_changed: '다른 장치입니다',
-  err_identity_changed_why: '선택한 USB와 실제 장치가 다릅니다. 안전을 위해 중단했습니다.',
+  err_identity_changed_why: '선택한 USB와 실제 장치가 다릅니다. 무엇이 다른지는 아래에 있습니다.',
+  // 준비 단계가 대상의 파티션 테이블을 지운 **뒤에** 실패한 경우.
+  // 다른 실패와 반드시 구분해야 한다. "탐색기를 닫고 다시 시도" 같은 안내는
+  // USB 가 멀쩡하다는 전제에서만 맞는데, 이 USB 는 이미 비어 있어서 탐색기에
+  // 뜨지도 않는다. 그 상태로 그 안내를 보여주면 사용자는 프로그램이 자기 USB 를
+  // 망가뜨려 놓고 남 탓을 한다고 읽는다.
+  err_target_erased: 'USB를 준비하다 중단됐습니다',
+  err_target_erased_why:
+    '이 USB의 원래 내용은 이미 지워진 뒤라 되돌릴 수 없습니다. 탐색기에서는 빈 장치로 보이거나 "포맷하시겠습니까"를 물어볼 수 있는데, 그건 고장이 아닙니다. USB를 뽑았다 다시 꽂고 「다시 시도」를 누르면 이어서 끝납니다. 중단된 이유는 아래에 있습니다.',
   err_network: '내려받지 못했습니다',
   err_network_why: '네트워크 연결을 확인하고 다시 시도해 주세요.',
   err_layout_gpt: 'GPT 로 만들어진 USB 는 아직 복제할 수 없습니다.',
@@ -157,6 +166,7 @@ const en: Dict = {
     'Only USB storage is listed. Internal disks never appear here.',
   step1_empty: 'No USB drive connected',
   step1_empty_hint: 'Plug one in and it will show up automatically',
+  step1_skipped: 'Some devices could not be listed:',
   refresh: 'Refresh',
   refreshing: 'Scanning…',
 
@@ -204,7 +214,10 @@ const en: Dict = {
     'It was unplugged or swapped during the operation. Reconnect it and start over.',
   err_identity_changed: 'This is a different device',
   err_identity_changed_why:
-    'The drive no longer matches the one you selected. Stopped for safety.',
+    'The drive no longer matches the one you selected. What differs is shown below.',
+  err_target_erased: 'Stopped while preparing the drive',
+  err_target_erased_why:
+    "This drive's original contents are already gone and cannot be recovered. Explorer may show it as empty or offer to format it -- that is expected, not a fault. Unplug it, plug it back in, and press Try again to finish. The reason it stopped is shown below.",
   err_network: 'Download failed',
   err_network_why: 'Check your network connection and try again.',
   err_layout_gpt: 'This drive uses GPT, which cannot be cloned yet.',

@@ -12,6 +12,7 @@ use crate::core::model::DiskInfo;
 use std::collections::HashSet;
 
 pub mod fake;
+pub mod prep;
 
 #[cfg(windows)]
 pub mod windows;
@@ -20,28 +21,45 @@ pub mod windows;
 ///
 /// 사용자에게 다른 안내를 해야 하는 것들을 구분해 둔다. 원인을 뭉뚱그리면
 /// "알 수 없는 오류"밖에 보여줄 수 없다.
+///
+/// **어느 작업에서 났는지를 잃어버리지 않는다.** 예전에는 Win32 5·32·1110 만
+/// 이름뿐인 변형으로 바뀌면서 코드도 작업 이름도 함께 버려졌다. 하필 그 셋이
+/// 원인이 가장 모호한 것들이라, 볼륨 잠금 실패와 플러시 실패와 핸들 열기 실패가
+/// 화면에서 전부 같은 한 단어로 보였다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceError {
     /// 관리자 권한이 없다.
     NeedsElevation,
     /// 장치를 찾을 수 없다. 목록을 만든 뒤 뽑혔을 가능성이 높다.
     NotFound { disk_number: u32 },
-    /// 다른 프로그램이 붙잡고 있어 잠글 수 없다.
+    /// 다른 프로그램이 붙잡고 있어 잠글 수 없다 (Win32 32).
     ///
     /// 재시도 한도까지 기다린 뒤에도 실패한 경우다. 누가 잡고 있는지는
     /// 알려주지 않는다 — raw 핸들 보유자는 Restart Manager 로 식별되지 않는다.
-    Locked,
-    /// 모든 잠금이 성공했는데도 쓰기가 거부됐다.
+    /// `op` 는 그 실패가 난 작업이다.
+    Locked { op: &'static str },
+    /// 장치가 접근을 거부했다 (Win32 5).
     ///
     /// Defender 의 Controlled Folder Access 가 원인일 수 있으나 확증된 바는 없다.
     /// 안내에서는 가능성으로만 제시한다.
-    WriteDenied,
-    /// 쓰는 도중 장치가 사라졌거나 교체됐다.
-    MediaChanged,
+    WriteDenied { op: &'static str },
+    /// 도중에 장치가 사라졌거나 교체됐다 (Win32 1110).
+    MediaChanged { op: &'static str },
     /// 섹터 크기가 비정상이다.
     BadSectorSize(u32),
     /// 쓰기 직전 확인에서 다른 장치로 판명됐다.
-    IdentityChanged,
+    ///
+    /// **무엇이 어긋났는지 함께 담는다.** 예전에는 이름만 올라가서, 사용자는
+    /// 엉뚱한 USB 를 집은 것인지 용량이 30초 만에 달라진 것인지(가짜 용량
+    /// USB 의 증상이다) 구별할 수 없었다.
+    IdentityChanged { message: String },
+    /// **대상을 이미 되돌릴 수 없게 바꾼 뒤에** 실패했다.
+    ///
+    /// 이걸 `Locked` 나 `WriteDenied` 로 올리면 화면에는 "탐색기 창을 닫고 다시
+    /// 시도해 주세요" 가 뜬다. 그 안내는 USB 가 멀쩡하다는 전제에서만 맞다.
+    /// 이 시점의 USB 는 파티션 테이블이 이미 지워져 탐색기에 뜨지도 않는다.
+    /// `message` 에 지금 상태와 원인과 준비 단계 기록이 함께 들어 있다.
+    TargetErased { code: i32, message: String },
     /// 그 외 입출력 오류. OS 오류 코드와 설명을 담는다.
     Io { code: i32, message: String },
 }
@@ -54,6 +72,20 @@ pub trait UsbEnumerator: Send + Sync {
     /// 열거 자체가 계층을 나누는 이유는, 안전 규칙을 순수 함수로 유지해
     /// 하드웨어 없이 테스트하기 위해서다.
     fn list_disks(&self) -> Result<Vec<DiskInfo>, DeviceError>;
+
+    /// 직전 열거에서 **빠진** 장치와 그 이유.
+    ///
+    /// 목록이 통째로 비었을 때만 오류에 실어 올리면, 디스크 하나만 제대로
+    /// 열거돼도 나머지 사유가 전부 사라진다. 내장 SSD 는 잘 읽히고 사용자의
+    /// USB 만 용량 조회에 실패한 경우가 정확히 그 모양이라 — 목록은 비어 있지
+    /// 않으니 오류도 안 나고, 그 USB 는 안전 규칙에 걸릴 것도 없이 그냥 없다.
+    /// 사용자는 빈 목록과 아무 설명도 없는 화면을 보는데, 백엔드는 그 USB 의
+    /// 오류 코드를 손에 쥐고 있다.
+    ///
+    /// 기본은 빈 목록이다. 가짜 구현처럼 빠뜨릴 것이 없는 쪽은 그대로 둔다.
+    fn skipped(&self) -> Vec<String> {
+        Vec::new()
+    }
 
     /// 절대 건드리면 안 되는 디스크 번호 집합.
     ///

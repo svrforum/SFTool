@@ -275,6 +275,29 @@ pub enum IdentityMismatch {
     Name { expected: String, actual: String },
 }
 
+impl IdentityMismatch {
+    /// 무엇이 어떻게 어긋났는지 사람이 읽는 한 줄로.
+    ///
+    /// 이 네 변형은 어긋난 항목과 두 값을 정확히 알고 있는데, 호출부들이
+    /// `map_err(|_| ...)` 로 통째로 버리고 "다른 장치입니다" 한 줄만 남겼다.
+    /// 그러면 사용자는 엉뚱한 USB 를 집은 것인지, 용량이 30초 만에 달라진
+    /// 것인지(가짜 용량 USB 의 대표 증상이다) 구별할 방법이 없다.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Number { expected, actual } => format!(
+                "디스크 번호가 다릅니다: {expected} 번을 골랐는데 장치는 {actual} 번이라고 답합니다"
+            ),
+            Self::BusType(b) => format!("USB 가 아닙니다: 연결 방식이 {b:?} 로 보고됩니다"),
+            Self::Size { expected, actual } => format!(
+                "용량이 다릅니다: 목록에서는 {expected} 바이트였는데 지금은 {actual} 바이트입니다"
+            ),
+            Self::Name { expected, actual } => {
+                format!("이름이 다릅니다: \"{expected}\" 를 골랐는데 지금은 \"{actual}\" 입니다")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,5 +717,43 @@ mod tests {
             can_clone(&a, &b, &protected, 1024),
             Err(Rejection::ReadOnly)
         );
+    }
+
+    /// 어긋난 항목과 두 값이 설명문에 그대로 남아야 한다.
+    ///
+    /// 이것들이 곧 원인이다. 가짜 용량 USB 는 "용량이 32GB 에서 16GB 로
+    /// 달라졌다" 로만 알아볼 수 있고, 포트 재사용은 번호로만 알아볼 수 있다.
+    #[test]
+    fn a_mismatch_says_which_field_diverged_and_to_what() {
+        let cases = [
+            (
+                IdentityMismatch::Number {
+                    expected: 2,
+                    actual: 3,
+                },
+                vec!["2", "3"],
+            ),
+            (
+                IdentityMismatch::Size {
+                    expected: 32_000_000_000,
+                    actual: 16_000_000_000,
+                },
+                vec!["32000000000", "16000000000"],
+            ),
+            (
+                IdentityMismatch::Name {
+                    expected: "SanDisk Ultra".into(),
+                    actual: "Generic Flash".into(),
+                },
+                vec!["SanDisk Ultra", "Generic Flash"],
+            ),
+            (IdentityMismatch::BusType(BusType::Sata), vec!["Sata"]),
+        ];
+        for (m, wanted) in cases {
+            let d = m.describe();
+            for w in wanted {
+                assert!(d.contains(w), "{m:?} 의 설명에 {w} 가 없다: {d}");
+            }
+        }
     }
 }

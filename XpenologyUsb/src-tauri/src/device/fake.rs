@@ -16,11 +16,26 @@ use std::sync::{Arc, Mutex};
 pub struct FakeEnumerator {
     disks: Vec<DiskInfo>,
     protected: HashSet<u32>,
+    /// 열거에서 빠진 장치와 그 사유. 부분 실패를 흉내낼 때 채운다.
+    skipped: Vec<String>,
 }
 
 impl FakeEnumerator {
     pub fn new(disks: Vec<DiskInfo>, protected: HashSet<u32>) -> Self {
-        Self { disks, protected }
+        Self {
+            disks,
+            protected,
+            skipped: Vec::new(),
+        }
+    }
+
+    /// 일부 디스크는 열거되고 일부는 사유와 함께 빠진 상태를 만든다.
+    ///
+    /// 실물에서 가장 흔한 모양이다 — 내장 SSD 는 잘 읽히고 컨트롤러가 불안한
+    /// USB 하나만 용량 조회에 실패한다.
+    pub fn with_skipped(mut self, notes: Vec<String>) -> Self {
+        self.skipped = notes;
+        self
     }
 
     /// 개발 환경에서 앱을 띄울 때 쓰는 표본.
@@ -129,6 +144,9 @@ impl UsbEnumerator for FakeEnumerator {
     fn list_disks(&self) -> Result<Vec<DiskInfo>, DeviceError> {
         Ok(self.disks.clone())
     }
+    fn skipped(&self) -> Vec<String> {
+        self.skipped.clone()
+    }
     fn protected_disk_numbers(&self) -> Result<HashSet<u32>, DeviceError> {
         Ok(self.protected.clone())
     }
@@ -144,6 +162,7 @@ pub struct FakeSession {
     data: Arc<Mutex<Vec<u8>>>,
     finished: Arc<Mutex<bool>>,
     corrupt_after: Option<u64>,
+    fail_at: Option<u64>,
     offsets: Arc<Mutex<Vec<u64>>>,
 }
 
@@ -167,6 +186,14 @@ impl WriteSession for FakeSession {
                 code: 87,
                 message: "정렬되지 않은 쓰기 (길이와 오프셋은 섹터 배수여야 함)".into(),
             });
+        }
+        // 쓰는 도중 뽑힌 USB 흉내. 여기서부터는 대놓고 실패한다.
+        if let Some(limit) = self.fail_at {
+            if offset + buf.len() as u64 > limit {
+                return Err(DeviceError::MediaChanged {
+                    op: "장치 쓰기"
+                });
+            }
         }
         self.offsets.lock().unwrap().push(offset);
         let mut d = self.data.lock().unwrap();
@@ -245,6 +272,8 @@ pub struct FakeWriter {
     /// 보고하고도 실제로는 저장하지 않는 경우가 있어서, 검증이 그것을
     /// 잡아내는지 시험하려면 이런 장치가 필요하다.
     corrupt_after: Option<u64>,
+    /// 이 오프셋을 넘는 쓰기가 실패한다. 쓰는 도중 뽑힌 USB 를 흉내낸다.
+    fail_at: Option<u64>,
 }
 
 impl FakeWriter {
@@ -255,6 +284,7 @@ impl FakeWriter {
             finished: Arc::new(Mutex::new(false)),
             observed_override: None,
             corrupt_after: None,
+            fail_at: None,
             offsets: Arc::new(Mutex::new(Vec::new())),
             opened: Arc::new(Mutex::new(false)),
         }
@@ -269,6 +299,17 @@ impl FakeWriter {
     /// 지정 오프셋 이후의 쓰기를 삼키는 불량 장치로 만든다.
     pub fn corrupting_after(mut self, offset: u64) -> Self {
         self.corrupt_after = Some(offset);
+        self
+    }
+
+    /// 지정 오프셋부터 쓰기가 실패하는 장치로 만든다.
+    ///
+    /// `corrupting_after` 와 다르다. 저건 성공을 거짓 보고하는 불량 USB 고,
+    /// 이건 쓰는 도중 빠져버린 USB 다. 후자는 **대상이 이미 지워지고 일부만
+    /// 쓰인 상태로** 작업이 끝나므로, 사용자에게 그 사실을 알리는지 확인하려면
+    /// 이 흉내가 필요하다.
+    pub fn failing_at(mut self, offset: u64) -> Self {
+        self.fail_at = Some(offset);
         self
     }
 
@@ -309,6 +350,7 @@ impl RawWriter for FakeWriter {
             data: Arc::clone(&self.storage),
             finished: Arc::clone(&self.finished),
             corrupt_after: self.corrupt_after,
+            fail_at: self.fail_at,
             offsets: Arc::clone(&self.offsets),
         }))
     }
@@ -397,7 +439,9 @@ impl ReadSession for FakeReadSession {
         }
         if let Some(limit) = self.fail_at {
             if offset + buf.len() as u64 > limit {
-                return Err(DeviceError::MediaChanged);
+                return Err(DeviceError::MediaChanged {
+                    op: "장치 읽기"
+                });
             }
         }
         let end = offset as usize + buf.len();

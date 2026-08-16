@@ -98,27 +98,44 @@ fn to_entry(disk: &DiskInfo, availability: Availability) -> DiskEntry {
     }
 }
 
+/// 목록 화면에 필요한 전부.
+///
+/// 목록만 돌려주던 시절에는 열거에서 **빠진** 장치의 사유를 담을 자리가
+/// 아예 없었다. 그래서 사용자의 USB 하나만 조회에 실패하면 — 다른 디스크가
+/// 하나라도 읽히는 한 — 그 USB 는 아무 설명 없이 목록에서 사라졌고, 화면에는
+/// "USB를 찾지 못했습니다" 만 남았다. 백엔드는 그 장치의 Win32 오류 코드를
+/// 손에 쥔 채였다.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiskList {
+    pub disks: Vec<DiskEntry>,
+    /// 열거에서 빠진 장치와 그 사유. 목록 밑에 그대로 보여준다.
+    pub notes: Vec<String>,
+}
+
 /// 목록에 보여줄 디스크들.
 ///
 /// 감춰야 할 것은 여기서 이미 빠진다. 프런트엔드는 걸러내는 책임을 지지 않는다 —
 /// UI 버그가 내장 디스크를 노출시키는 경로를 아예 만들지 않기 위해서다.
-pub fn list_disks_with(enumerator: &dyn UsbEnumerator) -> Result<Vec<DiskEntry>, String> {
+pub fn list_disks_with(enumerator: &dyn UsbEnumerator) -> Result<DiskList, String> {
     let protected = enumerator
         .protected_disk_numbers()
         .map_err(|e| format!("{e:?}"))?;
     let disks = enumerator.list_disks().map_err(|e| format!("{e:?}"))?;
 
-    Ok(disks
-        .iter()
-        .filter_map(|d| {
-            let a = safety::availability(d, &protected);
-            if a.is_visible() {
-                Some(to_entry(d, a))
-            } else {
-                None
-            }
-        })
-        .collect())
+    Ok(DiskList {
+        disks: disks
+            .iter()
+            .filter_map(|d| {
+                let a = safety::availability(d, &protected);
+                if a.is_visible() {
+                    Some(to_entry(d, a))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        notes: enumerator.skipped(),
+    })
 }
 
 #[cfg(test)]
@@ -128,7 +145,7 @@ mod tests {
 
     #[test]
     fn listing_hides_internal_disks_entirely() {
-        let entries = list_disks_with(&FakeEnumerator::sample()).unwrap();
+        let entries = list_disks_with(&FakeEnumerator::sample()).unwrap().disks;
         // 표본에는 시스템 NVMe 와 SATA HDD 가 들어 있다. 하나도 나오면 안 된다.
         assert!(!entries.iter().any(|e| e.name.contains("990 PRO")));
         assert!(!entries.iter().any(|e| e.name.contains("WDC")));
@@ -137,7 +154,7 @@ mod tests {
 
     #[test]
     fn listing_keeps_unusable_sticks_visible_with_a_reason() {
-        let entries = list_disks_with(&FakeEnumerator::sample()).unwrap();
+        let entries = list_disks_with(&FakeEnumerator::sample()).unwrap().disks;
         let small = entries.iter().find(|e| e.number == 4).unwrap();
         assert!(!small.ready);
         assert_eq!(
@@ -150,21 +167,41 @@ mod tests {
 
     #[test]
     fn empty_card_reader_is_not_listed() {
-        let entries = list_disks_with(&FakeEnumerator::sample()).unwrap();
+        let entries = list_disks_with(&FakeEnumerator::sample()).unwrap().disks;
         assert!(!entries.iter().any(|e| e.size_bytes == 0));
     }
 
     #[test]
     fn ready_entries_carry_display_fields() {
-        let entries = list_disks_with(&FakeEnumerator::sample()).unwrap();
+        let entries = list_disks_with(&FakeEnumerator::sample()).unwrap().disks;
         let ok = entries.iter().find(|e| e.ready).unwrap();
         assert!(ok.size_label.ends_with(" GB"), "실제: {}", ok.size_label);
         assert!(ok.blocked_reason.is_none());
     }
 
+    /// 일부만 열거된 경우에도 **빠진 장치의 사유가 화면까지 간다.**
+    ///
+    /// 예전에는 목록이 통째로 비었을 때만 사유가 올라갔다. 내장 SSD 가 하나만
+    /// 읽혀도 목록은 비어 있지 않으므로, 정작 사용자가 찾는 USB 가 조회 실패로
+    /// 빠지면 아무 설명 없이 사라졌다. 사용자가 할 수 있는 일은 USB 를 다시
+    /// 꽂아보는 것뿐이었고, 원인은 백엔드 안에만 있었다.
+    #[test]
+    fn a_disk_that_was_skipped_is_explained_even_when_others_enumerated() {
+        let e = FakeEnumerator::sample().with_skipped(vec![
+            "디스크 2: 용량 조회 실패 (Win32 21 — 장치가 준비되지 않음)".into(),
+        ]);
+        let out = list_disks_with(&e).unwrap();
+        assert!(
+            !out.disks.is_empty(),
+            "이 상황은 일부가 열거된 경우여야 한다"
+        );
+        assert_eq!(out.notes.len(), 1, "빠진 사유가 사라졌다");
+        assert!(out.notes[0].contains("21"), "실제: {}", out.notes[0]);
+    }
+
     #[test]
     fn drive_letters_are_exposed_for_recognition() {
-        let entries = list_disks_with(&FakeEnumerator::sample()).unwrap();
+        let entries = list_disks_with(&FakeEnumerator::sample()).unwrap().disks;
         let sandisk = entries.iter().find(|e| e.number == 2).unwrap();
         assert_eq!(sandisk.drive_letters, vec!["E:"]);
     }

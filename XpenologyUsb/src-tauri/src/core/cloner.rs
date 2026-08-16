@@ -47,15 +47,32 @@ pub enum CloneError {
     Layout(LayoutError),
     /// 안전 규칙에 걸렸다.
     Rejected(Rejection),
-    /// 원본이 고를 때와 다른 장치다.
-    SourceIdentityChanged,
-    /// 대상이 고를 때와 다른 장치다.
-    TargetIdentityChanged,
+    /// 원본이 고를 때와 다른 장치다. 무엇이 어긋났는지 함께 담는다.
+    SourceIdentityChanged(String),
+    /// 대상이 고를 때와 다른 장치다. 무엇이 어긋났는지 함께 담는다.
+    TargetIdentityChanged(String),
     Device(DeviceError),
     /// 원본을 읽지 못했다.
     Source(String),
     VerifyMismatch,
+    /// **대상이 이미 지워진 뒤에** 실패했다.
+    ///
+    /// `RawWriter::open` 이 그 안에서 대상의 파티션 테이블을 지운다. 그 뒤의
+    /// 실패는 — 사용자가 누른 취소까지 포함해 — 원래 내용이 사라진 USB 를
+    /// 남긴다. 원본이 멀쩡한 것과는 별개다. 굽기 흐름의 같은 이름과 같은 이유다.
+    TargetErased {
+        cause: Box<CloneError>,
+    },
     Canceled,
+}
+
+impl CloneError {
+    /// 대상이 지워진 뒤에 난 실패로 표시한다. 원인은 그대로 안에 남는다.
+    fn already_erased(cause: CloneError) -> CloneError {
+        CloneError::TargetErased {
+            cause: Box::new(cause),
+        }
+    }
 }
 
 impl From<DeviceError> for CloneError {
@@ -99,7 +116,7 @@ pub fn analyze(
 
     let mut s = reader.open(source)?;
     safety::confirm_identity(source, s.observed())
-        .map_err(|_| CloneError::SourceIdentityChanged)?;
+        .map_err(|m| CloneError::SourceIdentityChanged(m.describe()))?;
     let l = read_layout(s.as_mut())?;
     s.finish()?;
     Ok(l)
@@ -135,7 +152,7 @@ pub fn run<F: FnMut(ProgressEvent)>(
     rep.begin(Stage::Analyzing, Some(source.friendly_name.clone()));
     let mut src = reader.open(source)?;
     safety::confirm_identity(source, src.observed())
-        .map_err(|_| CloneError::SourceIdentityChanged)?;
+        .map_err(|m| CloneError::SourceIdentityChanged(m.describe()))?;
     let plan = read_layout(src.as_mut())?;
 
     // --- 2. 여기까지 통과해야 대상을 건드린다 --------------------------------
@@ -146,42 +163,60 @@ pub fn run<F: FnMut(ProgressEvent)>(
     }
 
     rep.begin(Stage::Preparing, None);
-    let mut dst = writer.open(target)?;
-    safety::confirm_identity(target, dst.observed())
-        .map_err(|_| CloneError::TargetIdentityChanged)?;
+    let dst = writer.open(target)?;
 
-    // --- 3. 복사 ------------------------------------------------------------
-    rep.begin(Stage::Writing, None);
-    let mut stream = SessionReader::new(src, plan.bytes, CHUNK);
-    let out = sink::stream(
-        &mut stream,
-        dst.as_mut(),
-        Some(plan.bytes),
-        cancel,
-        &mut rep,
-    )?;
-    sink::zero_tail(dst.as_mut(), out.bytes)?;
+    // --- 3. 여기서부터 대상은 되돌릴 수 없다 --------------------------------
+    //
+    // `open()` 안에서 대상의 파티션 테이블이 이미 지워졌다. 아래의 어떤 실패도
+    // — 취소를 포함해 — 빈 대상을 남긴다. 감싸는 자리를 한 곳으로 모은 이유는
+    // 굽기 흐름과 같다: `?` 하나를 빠뜨리는 것만으로 그 사실이 다시 새어나간다.
+    let copied = copy_to_target(&cfg, target, dst, src, &plan, cancel, &mut rep)
+        .map_err(CloneError::already_erased)?;
 
-    // --- 4. 검증 (선택) -----------------------------------------------------
-    if cfg.verify {
-        rep.begin(Stage::Verifying, None);
-        sink::verify(dst.as_mut(), out.bytes, &out.hash, cancel, &mut rep)?;
-    }
-
-    // --- 5. 마무리 ----------------------------------------------------------
-    rep.begin(Stage::Finishing, None);
-    dst.finish()?;
-    // 원본도 닫는다. 열어 둔 핸들이 남으면 사용자가 USB 를 뽑을 수 없다.
-    stream.into_session().finish()?;
     rep.finish();
-
     Ok(CloneSummary {
-        bytes_copied: out.bytes,
+        bytes_copied: copied,
         partitions: plan.partitions,
         verified: cfg.verify,
         source_name: source.friendly_name.clone(),
         target_name: target.friendly_name.clone(),
     })
+}
+
+/// 대상을 연 뒤의 모든 단계. 복사한 바이트 수를 돌려준다.
+///
+/// [`run`] 에서 떼어낸 이유는 오직 하나, **되돌릴 수 없는 지점 이후의 실패를
+/// 한 자리에서 감싸기 위해서**다. 흐름 자체는 바뀌지 않았다.
+#[allow(clippy::too_many_arguments)]
+fn copy_to_target<F: FnMut(ProgressEvent)>(
+    cfg: &CloneConfig,
+    target: &DiskInfo,
+    mut dst: Box<dyn crate::device::WriteSession>,
+    src: Box<dyn crate::device::ReadSession>,
+    plan: &Layout,
+    cancel: &dyn Cancel,
+    rep: &mut ProgressReporter<F>,
+) -> Result<u64, CloneError> {
+    safety::confirm_identity(target, dst.observed())
+        .map_err(|m| CloneError::TargetIdentityChanged(m.describe()))?;
+
+    rep.begin(Stage::Writing, None);
+    let mut stream = SessionReader::new(src, plan.bytes, CHUNK);
+    let out = sink::stream(&mut stream, dst.as_mut(), Some(plan.bytes), cancel, rep)?;
+    sink::zero_tail(dst.as_mut(), out.bytes)?;
+
+    // --- 검증 (선택) --------------------------------------------------------
+    if cfg.verify {
+        rep.begin(Stage::Verifying, None);
+        sink::verify(dst.as_mut(), out.bytes, &out.hash, cancel, rep)?;
+    }
+
+    // --- 마무리 -------------------------------------------------------------
+    rep.begin(Stage::Finishing, None);
+    dst.finish()?;
+    // 원본도 닫는다. 열어 둔 핸들이 남으면 사용자가 USB 를 뽑을 수 없다.
+    stream.into_session().finish()?;
+    Ok(out.bytes)
 }
 
 #[cfg(test)]
@@ -192,6 +227,14 @@ mod tests {
     use crate::device::UsbEnumerator;
 
     const SECTOR: u32 = 512;
+
+    /// 대상이 지워진 뒤의 실패는 원인을 한 겹 안에 담는다. 알맹이만 꺼낸다.
+    fn cause(e: &CloneError) -> &CloneError {
+        match e {
+            CloneError::TargetErased { cause } => cause,
+            other => other,
+        }
+    }
 
     /// 파티션 하나가 `end_lba` 에서 끝나는 원본 디스크 이미지를 만든다.
     fn source_image(device_bytes: usize, end_lba: u32) -> Vec<u8> {
@@ -400,7 +443,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(e, CloneError::VerifyMismatch));
+        assert!(
+            matches!(cause(&e), CloneError::VerifyMismatch),
+            "실제: {e:?}"
+        );
     }
 
     #[test]
@@ -424,7 +470,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(e, CloneError::Source(_)));
+        assert!(matches!(cause(&e), CloneError::Source(_)), "실제: {e:?}");
     }
 
     #[test]
@@ -506,8 +552,73 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(e, CloneError::SourceIdentityChanged));
+        assert!(matches!(e, CloneError::SourceIdentityChanged { .. }));
         assert!(!writer.was_opened(), "대상이 열렸다 — 이미 지워진 뒤다");
         assert!(writer.write_offsets().is_empty());
+    }
+
+    /// 대상을 연 뒤에 실패하면 **대상이 이미 지워졌다는 사실**을 실어야 한다.
+    ///
+    /// 굽기 흐름과 같은 결함이다. 두 흐름이 같은 `RawWriter::open` 을 쓰므로
+    /// 대상이 파괴되는 지점도 같은데, 그 뒤의 실패를 그냥 올리면 사용자는
+    /// 원본이 멀쩡하니 아무것도 잃지 않았다고 생각한다. 잃은 것은 대상이다.
+    #[test]
+    fn a_failure_after_the_target_is_opened_says_the_target_is_already_erased() {
+        let (a, b, protected) = sticks();
+        let reader = FakeReader::new(source_image(8 * 1024 * 1024, 8192), SECTOR);
+        // 복사 도중 대상이 빠진다.
+        let writer = FakeWriter::new(16 * 1024 * 1024, SECTOR).failing_at(2 * 1024 * 1024);
+
+        let e = run(
+            CloneConfig { verify: false },
+            &a,
+            &b,
+            &protected,
+            &reader,
+            &writer,
+            &NeverCancel,
+            |_| {},
+        )
+        .unwrap_err();
+
+        assert!(
+            writer.was_opened(),
+            "이 테스트는 열린 뒤의 실패를 재현해야 한다"
+        );
+        assert!(
+            matches!(e, CloneError::TargetErased { .. }),
+            "대상이 지워진 뒤의 실패인데 그대로 올렸다: {e:?}"
+        );
+        assert!(
+            format!("{e:?}").contains("MediaChanged"),
+            "원인이 사라졌다: {e:?}"
+        );
+    }
+
+    /// 신원 확인 실패는 **무엇이 어긋났는지** 담아야 한다.
+    #[test]
+    fn a_swapped_source_reports_which_field_diverged() {
+        let (a, b, protected) = sticks();
+        let mut other = a.clone();
+        other.friendly_name = "다른 장치".into();
+        let reader =
+            FakeReader::new(source_image(8 * 1024 * 1024, 8192), SECTOR).with_observed(other);
+        let writer = FakeWriter::new(16 * 1024 * 1024, SECTOR);
+
+        let e = run(
+            CloneConfig { verify: false },
+            &a,
+            &b,
+            &protected,
+            &reader,
+            &writer,
+            &NeverCancel,
+            |_| {},
+        )
+        .unwrap_err();
+
+        let text = format!("{e:?}");
+        assert!(text.contains("다른 장치"), "어긋난 값이 버려졌다: {text}");
+        assert!(text.contains("이름이 다릅니다"), "실제: {text}");
     }
 }

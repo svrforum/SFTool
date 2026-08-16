@@ -454,6 +454,19 @@ button.ghost:hover {
   color: var(--fg-mute);
 }
 
+/* 목록에 넣지 못한 장치의 사유.
+   왼쪽 정렬로 둔다 — 오류 코드가 섞인 여러 줄이라 가운데 정렬하면 읽기 어렵다. */
+.scan-notes {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.08);
+  color: var(--fg-mute);
+  font-size: 12px;
+  text-align: left;
+  word-break: break-word;
+}
+
 /* 언어 전환.
    흐름 안에 둔다. fixed 로 띄우면 개발용 배너와 겹친다. */
 .lang {

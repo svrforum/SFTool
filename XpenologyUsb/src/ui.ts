@@ -22,6 +22,12 @@ export type DiskEntry = {
   blocked_detail: string | null;
 };
 
+/** `list_disks` 가 돌려주는 것. 목록과, 열거에서 빠진 것들의 사유. */
+export type DiskList = {
+  disks: DiskEntry[];
+  notes: string[];
+};
+
 export type Stage =
   | 'Resolving'
   | 'Downloading'
@@ -155,7 +161,14 @@ export function ejectBlock(status: EjectStatus): string {
  */
 export function normalizeFailure(err: unknown): Failure {
   const s = typeof err === 'string' ? err : JSON.stringify(err);
+  // **순서가 의미를 가진다.** 위에 있는 것이 이긴다.
+  //
+  // `TargetErased` 가 맨 앞인 이유: 그 오류는 안에 원인을 그대로 품고 있어서
+  // 문자열에 `Locked` 같은 이름이 함께 들어 있다. 뒤에 두면 "USB를 잠글 수
+  // 없습니다 / 탐색기를 닫고 다시 시도" 가 이기는데, 그 안내는 USB 가
+  // 멀쩡하다는 전제에서만 맞다. 이미 비워진 USB 를 두고 할 말이 아니다.
   const map: Record<string, string> = {
+    TargetErased: 'target_erased',
     NeedsElevation: 'needs_elevation',
     Locked: 'locked',
     WriteDenied: 'write_denied',

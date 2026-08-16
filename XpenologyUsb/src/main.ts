@@ -23,8 +23,10 @@ import {
   fmtEta,
   nl,
   normalizeFailure,
+  cleanDetail,
   segs,
   type DiskEntry,
+  type DiskList,
   type Failure,
   type ProgressEvent,
   type Stage,
@@ -95,6 +97,14 @@ type State = {
   eject: 'busy' | 'ok' | 'fail' | null;
   /** 목록을 다시 읽는 중인가. */
   scanning: boolean;
+  /**
+   * 열거에서 빠진 장치와 그 사유, 또는 열거 자체가 실패한 이유.
+   *
+   * 목록 밑에 그대로 보여준다. 이게 없던 시절에는 사용자의 USB 가 조회 실패로
+   * 빠져도 화면에는 "연결된 USB가 없습니다" 만 떴다 — 원인은 백엔드 안에만
+   * 있었고, 사용자가 할 수 있는 일은 USB 를 다시 꽂아보는 것뿐이었다.
+   */
+  diskNotes: string[];
 };
 
 const state: State = {
@@ -115,6 +125,7 @@ const state: State = {
   cloneSummary: null,
   eject: null,
   scanning: false,
+  diskNotes: [],
 };
 
 /** 굽기의 단계 순서. 검증은 선택이라 켰을 때만 들어간다. */
@@ -166,12 +177,20 @@ function loaderItem(id: LoaderId, name: string, sub: string, badge: boolean): st
 
 /** 디스크 목록. 비어 있으면 "꽂으면 나타납니다" 안내로 바꾼다. */
 function diskList(disks: DiskEntry[], selectedNumber: number | null): string {
+  // 빠진 장치의 사유는 목록이 비었든 아니든 보여준다. 하나만 빠진 경우가
+  // 오히려 알기 어렵다 — 목록에 다른 것이 있으니 아무 문제가 없어 보인다.
+  const notes = state.diskNotes.length
+    ? `<div class="hint scan-notes">${esc(t('step1_skipped'))}
+         ${state.diskNotes.map((n) => `<div>${esc(n)}</div>`).join('')}
+       </div>`
+    : '';
   if (disks.length === 0) {
     return `<div class="empty">${esc(t('step1_empty'))}
               <div class="hint">${esc(t('step1_empty_hint'))}</div>
+              ${notes}
             </div>`;
   }
-  return disks.map((d) => diskItem(d, selectedNumber)).join('');
+  return disks.map((d) => diskItem(d, selectedNumber)).join('') + notes;
 }
 
 /** 시작 화면. 여기서만 갈래를 고를 수 있다. */
@@ -955,10 +974,12 @@ async function refreshDisks(): Promise<void> {
   state.scanning = true;
   render();
   try {
-    const next = isBrowserPreview()
-      ? previewDisks
-      : await invoke<DiskEntry[]>('list_disks');
+    const listed = isBrowserPreview()
+      ? { disks: previewDisks, notes: [] }
+      : await invoke<DiskList>('list_disks');
+    const next = listed.disks;
     state.disks = next;
+    state.diskNotes = listed.notes;
 
     // 고른 USB 가 사라졌으면 선택을 지운다. 남겨두면 "다음" 이 눌리는데
     // 대상이 없는 상태가 된다.
@@ -982,8 +1003,11 @@ async function refreshDisks(): Promise<void> {
       state.selectedDisk = ready[0].number;
     }
   } catch (err) {
+    // 콘솔에만 적고 빈 목록을 보여주면, 사용자는 USB 가 없다고 읽는다.
+    // 열거가 실패한 것과 USB 가 없는 것은 다른 상황이고 할 일도 다르다.
     console.error('목록 갱신 실패', err);
     state.disks = [];
+    state.diskNotes = [cleanDetail(String(err))];
   } finally {
     state.scanning = false;
     render();
@@ -1013,13 +1037,16 @@ async function boot() {
       state.disks = previewDisks;
     } else {
       state.simulated = await invoke<boolean>('is_simulated');
-      state.disks = await invoke<DiskEntry[]>('list_disks');
+      const listed = await invoke<DiskList>('list_disks');
+      state.disks = listed.disks;
+      state.diskNotes = listed.notes;
     }
     // 선택 가능한 것이 하나뿐이면 미리 골라둔다. 흔한 경우라 클릭을 아낀다.
     const ready = state.disks.filter((d) => d.ready);
     if (ready.length === 1) state.selectedDisk = ready[0].number;
   } catch (err) {
     console.error('열거 실패', err);
+    state.diskNotes = [cleanDetail(String(err))];
   } finally {
     state.loading = false;
     render();

@@ -89,7 +89,7 @@ struct AppState {
 }
 
 #[tauri::command]
-fn list_disks() -> Result<Vec<commands::DiskEntry>, String> {
+fn list_disks() -> Result<commands::DiskList, String> {
     commands::list_disks_with(enumerator().as_ref())
 }
 

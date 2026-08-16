@@ -69,13 +69,18 @@ fn wide(s: &str) -> Vec<u16> {
 /// 열기가 실패한 것인지, 레이아웃 초기화인지, 쓰기인지 알 수 없어서
 /// 사용자가 보고해도 원인을 좁힐 수 없었다. 오류가 어디서 났는지 모르면
 /// 오류를 보고받는 의미가 없다.
-fn last_error_in(op: &str) -> DeviceError {
+/// 세 개의 흔한 코드는 전용 변형이 되지만 **작업 이름은 거기에도 실린다.**
+/// 예전에는 5·32·1110 만 이름뿐인 변형으로 바뀌면서 코드도 작업 이름도 함께
+/// 버려졌다. 하필 그 셋이 원인이 가장 모호한 것들이라, 볼륨 열기 실패와
+/// 플러시 실패가 화면에서 똑같은 한 단어로 보였다 — 정작 드물게 나는 21 번은
+/// 작업 이름을 온전히 달고 나왔다.
+fn last_error_in(op: &'static str) -> DeviceError {
     // 안전성: GetLastError 는 스레드 로컬 값을 읽기만 한다.
     let code = unsafe { GetLastError() }.0 as i32;
     match code {
-        5 => DeviceError::WriteDenied,     // ERROR_ACCESS_DENIED
-        32 => DeviceError::Locked,         // ERROR_SHARING_VIOLATION
-        1110 => DeviceError::MediaChanged, // ERROR_MEDIA_CHANGED
+        5 => DeviceError::WriteDenied { op },     // ERROR_ACCESS_DENIED
+        32 => DeviceError::Locked { op },         // ERROR_SHARING_VIOLATION
+        1110 => DeviceError::MediaChanged { op }, // ERROR_MEDIA_CHANGED
         _ => DeviceError::Io {
             code,
             message: format!("{op} 실패: Win32 오류 {code}{}", explain(code)),
@@ -163,14 +168,14 @@ pub fn get_handle(
     path: &str,
     lock: bool,
     write_access: bool,
-    op: &str,
+    op: &'static str,
 ) -> Result<OwnedHandle, DeviceError> {
     let wide_path = wide(path);
     let access = if write_access { GENERIC_RW } else { GENERIC_R };
     // Rufus 는 잠글 때 공유 쓰기를 주지 않는다. 둘은 함께 움직인다.
     let mut share_write = !lock;
 
-    let mut last = DeviceError::Locked;
+    let mut last = DeviceError::Locked { op };
     for attempt in 0..OPEN_RETRIES {
         let share = if share_write {
             FILE_SHARE_READ | FILE_SHARE_WRITE
@@ -199,7 +204,7 @@ pub fn get_handle(
                 }
                 // 경계 검사를 끄고 잠근다. 잠금은 열기의 일부다.
                 let _ = control(&handle, FSCTL_ALLOW_EXTENDED_DASD_IO, "경계 검사 해제");
-                match lock_within(&handle, LOCK_BUDGET) {
+                match lock_within(&handle, LOCK_BUDGET, op) {
                     Ok(()) => return Ok(handle),
                     Err(e) => {
                         // 잠기지 않은 핸들은 쓸모가 없다. 닫고 실패로 돌린다.
@@ -216,9 +221,9 @@ pub fn get_handle(
                     return Err(last_error_in(op));
                 }
                 last = if code == 5 {
-                    DeviceError::WriteDenied
+                    DeviceError::WriteDenied { op }
                 } else {
-                    DeviceError::Locked
+                    DeviceError::Locked { op }
                 };
                 if attempt >= SHARE_WRITE_AFTER {
                     share_write = true;
@@ -231,13 +236,17 @@ pub fn get_handle(
 }
 
 /// 예산 안에서 볼륨 잠금을 시도한다. 벽시계 기준이라 재시도 횟수에 의존하지 않는다.
-fn lock_within(h: &OwnedHandle, budget: std::time::Duration) -> Result<(), DeviceError> {
+fn lock_within(
+    h: &OwnedHandle,
+    budget: std::time::Duration,
+    op: &'static str,
+) -> Result<(), DeviceError> {
     let deadline = std::time::Instant::now() + budget;
-    let mut last = DeviceError::Locked;
+    let mut last = DeviceError::Locked { op };
     loop {
         match control(h, FSCTL_LOCK_VOLUME, "볼륨 잠금") {
             Ok(()) => return Ok(()),
-            Err(e @ (DeviceError::Locked | DeviceError::WriteDenied)) => last = e,
+            Err(e @ (DeviceError::Locked { .. } | DeviceError::WriteDenied { .. })) => last = e,
             Err(DeviceError::Io { code: 32, .. }) => {}
             // 기다려도 달라지지 않는 오류는 즉시 포기한다.
             Err(e) => return Err(e),
@@ -526,14 +535,26 @@ pub fn volume_disk_numbers(h: &OwnedHandle) -> Result<Vec<(u32, u32)>, DeviceErr
 ///
 /// 드라이브 문자에 의존하지 않는다. 문자 없는 볼륨(ESP, MSR, 리눅스 파티션)도
 /// 마운트돼 있으면 raw 쓰기를 막기 때문에 반드시 포함해야 한다.
+///
+/// 훑기 자체가 실패했는지 알아야 하는 쪽은 [`enumerate_volumes_reporting`] 을 쓴다.
 pub fn enumerate_volumes() -> Vec<(u32, VolumeInfo)> {
+    enumerate_volumes_reporting().0
+}
+
+/// 볼륨 목록과 **훑기가 성공했는가**를 함께 돌려준다.
+///
+/// 둘을 나눠 돌려주는 이유는, 빈 목록이 두 가지 전혀 다른 상황을 뜻하기
+/// 때문이다: 잠글 볼륨이 정말 없거나, `FindFirstVolumeW` 가 실패해 **아무것도
+/// 확인하지 못했거나**. 준비 단계는 이 둘을 구별하지 못한 채 후자를 "준비 완료
+/// (볼륨 0 잠금)" 이라고 사용자에게 말했다.
+pub fn enumerate_volumes_reporting() -> (Vec<(u32, VolumeInfo)>, bool) {
     let mut out = Vec::new();
     let mut name = [0u16; MAX_PATH as usize + 1];
 
     // 안전성: name 은 충분히 크고, 반환 핸들은 아래에서 반드시 닫는다.
     let find = match unsafe { FindFirstVolumeW(&mut name) } {
         Ok(h) => h,
-        Err(_) => return out,
+        Err(_) => return (out, false),
     };
 
     loop {
@@ -572,7 +593,7 @@ pub fn enumerate_volumes() -> Vec<(u32, VolumeInfo)> {
     unsafe {
         let _ = FindVolumeClose(find);
     }
-    out
+    (out, true)
 }
 
 /// 조회 전용 볼륨 핸들. 권한 상승 없이 열린다.
@@ -857,7 +878,7 @@ pub fn flush(h: &OwnedHandle) -> Result<(), DeviceError> {
 /// 전체를 오염시켰다. 잠금 재시도는 "다른 프로그램이 쓰는 중"과 "이 장치가 그
 /// IOCTL 을 지원하지 않음"을 구분하지 못해 후자에도 15초를 다 태웠고,
 /// 마운트 해제나 속성 갱신 실패는 흔적조차 남지 않았다.
-fn control(h: &OwnedHandle, code: u32, op: &str) -> Result<(), DeviceError> {
+fn control(h: &OwnedHandle, code: u32, op: &'static str) -> Result<(), DeviceError> {
     let mut returned = 0u32;
     // 안전성: 입출력 버퍼가 없는 제어 코드다.
     unsafe { DeviceIoControl(h.raw(), code, None, 0, None, 0, Some(&mut returned), None) }

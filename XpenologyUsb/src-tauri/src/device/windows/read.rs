@@ -36,7 +36,12 @@ impl RawReader for WindowsRawReader {
         // 번호를 장치에서 직접 읽는다. 고른 번호를 복사해 비교하면 동어반복이 된다.
         let actual_number = ioctl::query_device_number(&handle)?;
         if actual_number != disk.number {
-            return Err(DeviceError::IdentityChanged);
+            return Err(DeviceError::IdentityChanged {
+                message: format!(
+                    "디스크 번호가 다릅니다: {} 번을 골랐는데 장치는 {actual_number} 번이라고 답합니다",
+                    disk.number
+                ),
+            });
         }
 
         let desc = ioctl::query_device_descriptor(&handle)?;
@@ -67,7 +72,12 @@ impl RawReader for WindowsRawReader {
         };
 
         if observed.bus_type != BusType::Usb {
-            return Err(DeviceError::IdentityChanged);
+            return Err(DeviceError::IdentityChanged {
+                message: format!(
+                    "USB 가 아닙니다: 연결 방식이 {:?} 입니다",
+                    observed.bus_type
+                ),
+            });
         }
 
         let sector = ioctl::query_sector_size(&handle)?;
@@ -90,7 +100,9 @@ struct WindowsReadSession {
 
 impl WindowsReadSession {
     fn hnd(&self) -> Result<&OwnedHandle, DeviceError> {
-        self.handle.as_ref().ok_or(DeviceError::MediaChanged)
+        self.handle.as_ref().ok_or(DeviceError::MediaChanged {
+            op: "원본 디스크 핸들",
+        })
     }
 }
 
