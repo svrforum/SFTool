@@ -12,6 +12,28 @@ type Dict = Record<string, string>;
 const ko: Dict = {
   simulated: '개발용 가짜 데이터입니다. 실제 USB가 아닙니다.',
 
+  app_title: 'Xpenology USB',
+  mode_burn_title: '로더 굽기',
+  mode_burn_sub: '최신 로더를 받아 새 USB 에 굽습니다',
+  mode_clone_title: 'USB 복제',
+  mode_clone_sub: '이미 만든 USB 를 다른 USB 로 복사합니다',
+
+  clone_pick_source: '복사할 원본\nUSB 를 고르세요',
+  clone_pick_source_hint:
+    '로더가 이미 써진 USB 입니다. 읽기만 하고 바꾸지 않습니다.',
+  clone_pick_target: '복사해 넣을\nUSB 를 고르세요',
+  clone_pick_target_hint: '이 USB 의 내용은 모두 사라집니다.',
+  clone_confirm_title: '이 방향이\n맞나요?',
+  clone_source: '원본 (읽기만)',
+  clone_target: '대상 (전부 지워짐)',
+  clone_amount: '복사할 양',
+  clone_partitions: '파티션 {0}개',
+  clone_go: '복제 시작',
+  clone_analyzing: '원본을 살펴보는 중…',
+  clone_done: '복제가\n끝났습니다',
+  clone_done_sub: '{0} 를 {1} 로 복사했습니다',
+  verify_label: '쓴 뒤에 다시 읽어 확인합니다 (시간이 더 걸립니다)',
+
   step1_title: 'USB를\n선택해 주세요',
   step1_lead: 'USB 저장장치만 표시됩니다. 내장 디스크는 목록에 나오지 않습니다.',
   step1_empty: '연결된 USB가 없습니다',
@@ -34,6 +56,7 @@ const ko: Dict = {
   step4_lead: '완료될 때까지 USB를 뽑지 마세요.',
 
   // 단계 이름
+  stage_Analyzing: '원본 분석',
   stage_Resolving: '최신 버전 확인',
   stage_Downloading: '내려받기',
   stage_Extracting: '압축 해제',
@@ -62,6 +85,13 @@ const ko: Dict = {
   err_identity_changed_why: '선택한 USB와 실제 장치가 다릅니다. 안전을 위해 중단했습니다.',
   err_network: '내려받지 못했습니다',
   err_network_why: '네트워크 연결을 확인하고 다시 시도해 주세요.',
+  err_layout_gpt: 'GPT 로 만들어진 USB 는 아직 복제할 수 없습니다.',
+  err_layout_gpt_why:
+    '이 프로그램이 만드는 로더 USB 는 MBR 입니다. 다른 방식으로 만들어진 USB 로 보입니다.',
+  err_layout_nosig: '이 USB 에서 파티션을 찾지 못했습니다.',
+  err_layout_nosig_why: '로더가 써진 USB 가 맞는지 확인하고 다시 골라 주세요.',
+  err_same_disk: '원본과 같은 USB 입니다',
+  err_same_disk_why: '복사해 넣을 USB 는 원본과 다른 것이어야 합니다.',
   err_generic_why: '문제가 계속되면 아래 내용을 함께 알려주세요.',
   retry: '다시 시도',
 
@@ -94,10 +124,33 @@ const ko: Dict = {
   reason_no_media: '미디어가 없습니다',
   reason_spanned_volume: '여러 디스크에 걸친 볼륨이 있습니다',
   reason_source_on_target: '이미지가 이 USB에 있습니다',
+  reason_same_disk: '원본과 같은 USB 입니다',
 };
 
 const en: Dict = {
   simulated: 'Showing simulated devices. These are not real USB drives.',
+
+  app_title: 'Xpenology USB',
+  mode_burn_title: 'Write a loader',
+  mode_burn_sub: 'Download the latest loader and write it to a USB drive',
+  mode_clone_title: 'Clone a USB',
+  mode_clone_sub: 'Copy a USB drive you already prepared onto another one',
+
+  clone_pick_source: 'Choose the drive\nto copy from',
+  clone_pick_source_hint:
+    'The one that already has a loader on it. It is only read, never changed.',
+  clone_pick_target: 'Choose the drive\nto copy onto',
+  clone_pick_target_hint: 'Everything on this drive will be erased.',
+  clone_confirm_title: 'Is this the\nright way round?',
+  clone_source: 'Source (read only)',
+  clone_target: 'Target (erased)',
+  clone_amount: 'To copy',
+  clone_partitions: '{0} partitions',
+  clone_go: 'Start cloning',
+  clone_analyzing: 'Reading the source…',
+  clone_done: 'Clone\nfinished',
+  clone_done_sub: 'Copied {0} onto {1}',
+  verify_label: 'Read the drive back afterwards to check it (takes longer)',
 
   step1_title: 'Choose\nyour USB drive',
   step1_lead:
@@ -121,6 +174,7 @@ const en: Dict = {
   step4_title: 'Creating\nyour USB drive',
   step4_lead: 'Do not unplug the drive until this finishes.',
 
+  stage_Analyzing: 'Analysing source',
   stage_Resolving: 'Checking latest release',
   stage_Downloading: 'Downloading',
   stage_Extracting: 'Extracting',
@@ -153,6 +207,14 @@ const en: Dict = {
     'The drive no longer matches the one you selected. Stopped for safety.',
   err_network: 'Download failed',
   err_network_why: 'Check your network connection and try again.',
+  err_layout_gpt: 'This drive uses GPT, which cannot be cloned yet.',
+  err_layout_gpt_why:
+    'The loader drives this program writes use MBR, so this one was made some other way.',
+  err_layout_nosig: 'No partitions found on this drive.',
+  err_layout_nosig_why:
+    'Make sure you picked the drive that has the loader on it.',
+  err_same_disk: 'Same drive as the source',
+  err_same_disk_why: 'The drive you copy onto has to be a different one.',
   err_generic_why: 'If this keeps happening, please include the details below.',
   retry: 'Try again',
 
@@ -184,6 +246,7 @@ const en: Dict = {
   reason_no_media: 'No media inserted',
   reason_spanned_volume: 'Contains a volume spanning several disks',
   reason_source_on_target: 'The image lives on this drive',
+  reason_same_disk: 'Same drive as the source',
 };
 
 const dicts: Record<Lang, Dict> = { ko, en };

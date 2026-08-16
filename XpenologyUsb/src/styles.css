@@ -574,3 +574,120 @@ button.refresh:disabled {
   color: var(--fg-mute);
   cursor: default;
 }
+
+/* 시작 화면 — 굽기와 복제 중 하나를 고른다 */
+main.home .center {
+  text-align: left;
+}
+
+.modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 28px;
+}
+
+.mode {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  padding: 22px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.mode:hover {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+}
+
+.mode-ico {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.mode-name {
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+
+.mode-sub {
+  font-size: 13px;
+  color: var(--fg-sub);
+  line-height: 1.45;
+}
+
+/* 복제 확인 — 어느 쪽이 지워지는지가 한눈에 들어와야 한다 */
+.clone-confirm {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 10px;
+  margin: 24px 0;
+}
+
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  min-width: 0;
+}
+
+/* 지워지는 쪽만 경고 색을 쓴다. 양쪽 다 붉으면 구별이 사라진다. */
+.side.danger {
+  background: var(--danger-weak);
+  border-color: var(--danger);
+}
+
+.side strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: -0.3px;
+}
+
+.side-label {
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+
+.side-note {
+  font-size: 12px;
+  color: var(--fg-sub);
+  line-height: 1.45;
+}
+
+.side-note.warn {
+  color: var(--danger);
+}
+
+.arrow {
+  font-size: 20px;
+  color: var(--fg-mute);
+}
+
+/* 검증 체크박스 */
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 13px;
+  color: var(--fg-sub);
+  cursor: pointer;
+}
+
+.check input {
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}

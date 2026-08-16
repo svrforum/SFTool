@@ -7,37 +7,15 @@
 
 use super::loader::{Loader, Release, ResolvedImage};
 use super::pipeline::ProgressReporter;
+// 바깥(lib.rs, 테스트)이 계속 `runner::Cancel` 로 쓸 수 있게 재노출한다.
+pub use super::pipeline::{Cancel, NeverCancel};
 use super::progress::Stage;
 use super::safety::{self, Rejection};
+use super::sink::{self, SinkError};
 use crate::core::model::DiskInfo;
 use crate::device::{DeviceError, RawWriter};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::Read;
-
-/// 장치에 한 번에 보내는 크기. 섹터 배수로 맞춰 쓴다.
-const CHUNK: usize = 8 * 1024 * 1024;
-
-/// 맨 앞에서 보류했다가 마지막에 쓰는 크기.
-///
-/// 이미지의 첫 부분에는 **그 이미지 자신의 파티션 테이블**이 들어 있다.
-/// 그걸 오프셋 0 에 쓰는 순간 장치에 유효한 파티션 테이블이 생기고, 윈도우가
-/// 그것을 감지해 **쓰는 도중에 볼륨을 마운트한다.** 탐색기가 갑자기 열리는 것이
-/// 그 증상이고, 새로 생긴 볼륨은 잠겨 있지 않으므로 그 섹터에 도달한 순간
-/// 쓰기가 거부된다. 실제로 24MiB 지점에서 그렇게 실패했다.
-///
-/// 준비 단계에서 아무리 지워도 소용이 없다. 우리가 쓰는 내용 자체가 파티션
-/// 테이블이기 때문이다. 그래서 앞부분을 보류했다가 **나머지를 다 쓴 뒤에**
-/// 채운다. 윈도우가 유효한 테이블을 보는 시점에는 이미 끝나 있다.
-///
-/// 1MiB 면 MBR(섹터 0), GPT 헤더(섹터 1), GPT 항목(섹터 2~33)을 모두 덮는다.
-const HOLDBACK: u64 = 1024 * 1024;
-
-/// 장치 끝에서 지울 크기.
-///
-/// 이미지가 USB 보다 작으면 끝에 남은 옛 GPT 백업 헤더 때문에 Windows 가
-/// 지워진 파티션 테이블을 되살린다.
-const TAIL_ZERO: u64 = 1024 * 1024;
 
 /// 작업 실패 원인.
 #[derive(Debug)]
@@ -63,6 +41,25 @@ pub enum RunError {
 impl From<DeviceError> for RunError {
     fn from(e: DeviceError) -> Self {
         RunError::Device(e)
+    }
+}
+
+impl From<SinkError> for RunError {
+    fn from(e: SinkError) -> Self {
+        match e {
+            SinkError::Source(s) => RunError::Extract(s),
+            // 압축을 푼 결과가 비었다는 뜻이다. 내려받기가 빈 본문을 받았거나
+            // zip 안의 이미지 항목 크기가 0 인 경우다.
+            SinkError::EmptySource => {
+                RunError::Extract("압축을 푼 이미지가 비어 있습니다 (0 바이트)".into())
+            }
+            SinkError::Device(d) => RunError::Device(d),
+            SinkError::TooSmall { need, have } => {
+                RunError::Rejected(Rejection::TooSmall { need, have })
+            }
+            SinkError::VerifyMismatch => RunError::VerifyMismatch { offset: 0 },
+            SinkError::Canceled => RunError::Canceled,
+        }
     }
 }
 
@@ -100,19 +97,6 @@ pub trait Io {
         data: Vec<u8>,
         name: &str,
     ) -> Result<(Box<dyn Read + Send>, Option<u64>), String>;
-}
-
-/// 취소 신호. 쓰기 도중에도 확인한다.
-pub trait Cancel {
-    fn is_canceled(&self) -> bool;
-}
-
-/// 취소를 지원하지 않는 기본 구현.
-pub struct NeverCancel;
-impl Cancel for NeverCancel {
-    fn is_canceled(&self) -> bool {
-        false
-    }
 }
 
 /// 작업이 끝난 뒤의 요약.
@@ -209,146 +193,19 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
     // 쓰기 직전 신원 확인. 목록을 만든 뒤 USB 가 바뀌었을 수 있다.
     safety::confirm_identity(disk, session.observed()).map_err(|_| RunError::IdentityChanged)?;
 
-    let sector = session.sector_size() as usize;
-    let capacity = session.total_bytes();
-
     rep.begin(Stage::Writing, None);
-    let mut buf = vec![0u8; CHUNK];
-    let mut offset: u64 = 0;
-    let mut last_t = std::time::Instant::now();
-    // 쓰면서 해시를 쌓아 둔다. 검증을 켰을 때 되읽은 내용과 대조하기 위한 것으로,
-    // 여기서 계산해 두지 않으면 이미지를 다시 내려받아야 한다.
-    let mut write_hasher = Sha256::new();
+    let out = sink::stream(
+        stream.as_mut(),
+        session.as_mut(),
+        expanded_size,
+        cancel,
+        &mut rep,
+    )?;
+    sink::zero_tail(session.as_mut(), out.bytes)?;
 
-    // 이미지 맨 앞을 담아 둘 곳. 마지막에 쓴다.
-    let mut holdback: Vec<u8> = Vec::new();
-
-    loop {
-        if cancel.is_canceled() {
-            return Err(RunError::Canceled);
-        }
-
-        // 청크를 채운다. Read 는 요청보다 적게 줄 수 있으므로 반복해서 채운다.
-        let mut filled = 0usize;
-        while filled < buf.len() {
-            match stream.read(&mut buf[filled..]) {
-                Ok(0) => break,
-                Ok(n) => filled += n,
-                Err(e) => return Err(RunError::Extract(e.to_string())),
-            }
-        }
-        if filled == 0 {
-            break;
-        }
-
-        // 앞 HOLDBACK 바이트는 지금 쓰지 않고 들고 있는다.
-        if (holdback.len() as u64) < HOLDBACK {
-            let want = (HOLDBACK - holdback.len() as u64) as usize;
-            let take = want.min(filled);
-            holdback.extend_from_slice(&buf[..take]);
-            write_hasher.update(&buf[..take]);
-            offset += take as u64;
-            if take == filled {
-                continue;
-            }
-            // 이 청크의 나머지는 정상적으로 쓴다.
-            buf.copy_within(take..filled, 0);
-            filled -= take;
-        }
-
-        // 장치에는 섹터 배수로만 쓸 수 있다. 마지막 조각은 올림하고
-        // 남는 부분을 0 으로 채운다 — 할당된 그대로 두면 힙 내용이 USB 에 실린다.
-        let padded = filled.div_ceil(sector) * sector;
-        if padded > filled {
-            buf[filled..padded].fill(0);
-        }
-
-        if offset + padded as u64 > capacity {
-            return Err(RunError::Rejected(Rejection::TooSmall {
-                need: offset + padded as u64,
-                have: capacity,
-            }));
-        }
-
-        session.write_at(offset, &buf[..padded])?;
-        write_hasher.update(&buf[..padded]);
-        offset += padded as u64;
-
-        let now = std::time::Instant::now();
-        // 알고 있는 크기를 넘어서면 추정이 틀린 것이므로 불확정으로 되돌린다.
-        // 100% 를 넘겨 표시하거나, 다 됐다고 보여준 뒤 계속 도는 것이
-        // 아무 숫자도 없는 것보다 나쁘다 — 사용자가 USB 를 뽑는다.
-        let total = expanded_size.filter(|t| offset <= *t);
-        rep.update(
-            offset,
-            total,
-            now.duration_since(last_t).as_secs_f64(),
-            padded as u64,
-        );
-        last_t = now;
-    }
-
-    // 보류해 둔 맨 앞을 이제 쓴다. 여기서 비로소 장치에 유효한 파티션 테이블이
-    // 생기지만, 나머지는 이미 다 쓰인 뒤라 윈도우가 볼륨을 마운트해도 늦다.
-    if !holdback.is_empty() {
-        let padded = holdback.len().div_ceil(sector) * sector;
-        holdback.resize(padded, 0);
-        session.write_at(0, &holdback)?;
-    }
-
-    // 이미지가 USB 보다 작으면 끝에 옛 GPT 백업 헤더가 남는다.
-    //
-    // 지우는 범위가 방금 쓴 이미지를 침범해서는 안 된다. 무조건 마지막 1MiB 를
-    // 지우면 이미지가 장치 끝까지 닿는 경우 이미지를 훼손한다.
-    // 이미지가 끝난 지점 이후만 지운다.
-    let tail_start = capacity.saturating_sub(TAIL_ZERO).max(offset);
-    if tail_start < capacity {
-        session.zero_tail(capacity - tail_start)?;
-    }
-
-    let written_hash = write_hasher.finalize();
-
-    // --- 4. 검증 (선택) -----------------------------------------------------
-    //
-    // 쓰는 동안 계산해 둔 해시와, 장치에서 되읽어 계산한 해시를 비교한다.
-    // 이미지를 다시 내려받지 않고도 "쓴 것과 장치에 있는 것이 같은가" 를
-    // 실제로 확인할 수 있다. 불량 USB 는 쓰기가 성공했다고 보고하고도
-    // 내용이 다른 경우가 있어서, 이 대조가 유일하게 그것을 잡는다.
     if cfg.verify {
         rep.begin(Stage::Verifying, None);
-        let mut back = vec![0u8; CHUNK];
-        let mut hasher = Sha256::new();
-        let mut pos = 0u64;
-        let mut last_v = std::time::Instant::now();
-
-        while pos < offset {
-            if cancel.is_canceled() {
-                return Err(RunError::Canceled);
-            }
-            let n = (CHUNK as u64).min(offset - pos) as usize;
-            // 읽기도 섹터 배수여야 한다.
-            let n = (n / sector) * sector;
-            if n == 0 {
-                break;
-            }
-            session.read_at(pos, &mut back[..n])?;
-            hasher.update(&back[..n]);
-            pos += n as u64;
-
-            let now = std::time::Instant::now();
-            rep.update(
-                pos,
-                Some(offset),
-                now.duration_since(last_v).as_secs_f64(),
-                n as u64,
-            );
-            last_v = now;
-        }
-
-        let read_back = hasher.finalize();
-        if read_back.as_slice() != written_hash.as_slice() {
-            return Err(RunError::VerifyMismatch { offset: 0 });
-        }
+        sink::verify(session.as_mut(), out.bytes, &out.hash, cancel, &mut rep)?;
     }
 
     // --- 5. 마무리 ----------------------------------------------------------
@@ -359,7 +216,7 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
         loader: cfg.loader.display_name().to_string(),
         tag: image.tag.clone(),
         asset_name: image.asset_name.clone(),
-        bytes_written: offset,
+        bytes_written: out.bytes,
         verified: cfg.verify,
     })
 }
@@ -367,6 +224,9 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 쓰기 규칙은 sink 로 옮겼지만, 그 규칙이 run() 을 통해 지켜지는지는
+    // 여기서 계속 확인한다. 경계값을 손으로 베끼면 상수가 바뀔 때 어긋난다.
+    use super::sink::{HOLDBACK, TAIL_ZERO};
     use crate::core::loader::Asset;
     use crate::device::fake::{FakeEnumerator, FakeWriter};
     use crate::device::UsbEnumerator;

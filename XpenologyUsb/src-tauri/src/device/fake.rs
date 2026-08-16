@@ -7,7 +7,7 @@
 //!    실패할 때마다 개발자의 디스크가 지워지므로, 가짜 구현이 유일하게 안전한 방법이다.
 //! 2. **개발 환경 실행** — Windows 가 아닌 곳에서 앱을 띄워 UI 를 확인한다.
 
-use super::{DeviceError, RawWriter, UsbEnumerator, WriteSession};
+use super::{DeviceError, RawReader, RawWriter, ReadSession, UsbEnumerator, WriteSession};
 use crate::core::model::{BusType, DiskInfo, VolumeInfo};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -230,6 +230,15 @@ pub struct FakeWriter {
     observed_override: Option<DiskInfo>,
     /// 쓰기가 일어난 오프셋 순서. 순서를 검증하는 테스트가 쓴다.
     offsets: Arc<Mutex<Vec<u64>>>,
+    /// `open` 이 불렸는가 — 즉 **대상이 파괴되기 시작했는가**.
+    ///
+    /// 이 플래그가 없으면 "대상을 건드리지 않았다" 를 검사할 방법이 없다.
+    /// 실제 [`crate::device::windows::WindowsRawWriter::open`] 은 그 안에서
+    /// 마운트 지점 제거·파티션 테이블 삭제·앞 1MiB 0으로 덮기를 전부 해치우는데,
+    /// 그중 어느 것도 `write_at` 이 아니다. 그래서 `write_offsets()` 가 비어
+    /// 있다는 것은 `sink::stream` 이 돌지 않았다는 뜻일 뿐, 디스크가 무사하다는
+    /// 뜻이 아니다. 열린 순간이 곧 되돌릴 수 없는 지점이므로 그것을 기록한다.
+    opened: Arc<Mutex<bool>>,
     /// 이 오프셋 이후의 쓰기를 조용히 버린다.
     ///
     /// 불량 USB 를 흉내내기 위한 것이다. 싸구려 USB 는 쓰기가 성공했다고
@@ -247,6 +256,7 @@ impl FakeWriter {
             observed_override: None,
             corrupt_after: None,
             offsets: Arc::new(Mutex::new(Vec::new())),
+            opened: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -276,10 +286,20 @@ impl FakeWriter {
     pub fn was_finished(&self) -> bool {
         *self.finished.lock().unwrap()
     }
+
+    /// 대상이 열렸는가 — **되돌릴 수 없는 지점을 넘었는가.**
+    ///
+    /// "인가보다 파괴가 먼저 오는" 회귀를 잡는 유일한 수단이다.
+    /// `write_offsets()` 만으로는 잡히지 않는 이유는 필드 주석에 적어 두었다.
+    pub fn was_opened(&self) -> bool {
+        *self.opened.lock().unwrap()
+    }
 }
 
 impl RawWriter for FakeWriter {
     fn open(&self, disk: &DiskInfo) -> Result<Box<dyn WriteSession>, DeviceError> {
+        // 실제 구현은 이 안에서 이미 디스크를 망가뜨린다. 그 사실을 기록한다.
+        *self.opened.lock().unwrap() = true;
         Ok(Box::new(FakeSession {
             observed: self
                 .observed_override
@@ -291,6 +311,109 @@ impl RawWriter for FakeWriter {
             corrupt_after: self.corrupt_after,
             offsets: Arc::clone(&self.offsets),
         }))
+    }
+}
+
+/// 가짜 원본. 정해진 내용을 돌려준다.
+pub struct FakeReader {
+    data: Arc<Vec<u8>>,
+    sector_size: u32,
+    observed_override: Option<DiskInfo>,
+    /// 이 오프셋부터 읽기가 실패한다. 도중에 뽑힌 USB 를 흉내낸다.
+    fail_at: Option<u64>,
+}
+
+impl FakeReader {
+    pub fn new(contents: Vec<u8>, sector_size: u32) -> Self {
+        Self {
+            data: Arc::new(contents),
+            sector_size,
+            observed_override: None,
+            fail_at: None,
+        }
+    }
+
+    /// 열었을 때 다른 장치가 관측되는 상황을 만든다.
+    pub fn with_observed(mut self, observed: DiskInfo) -> Self {
+        self.observed_override = Some(observed);
+        self
+    }
+
+    /// 지정 오프셋부터 읽기가 실패하는 장치로 만든다.
+    pub fn failing_at(mut self, offset: u64) -> Self {
+        self.fail_at = Some(offset);
+        self
+    }
+}
+
+impl RawReader for FakeReader {
+    fn open(&self, disk: &DiskInfo) -> Result<Box<dyn ReadSession>, DeviceError> {
+        Ok(Box::new(FakeReadSession {
+            observed: self
+                .observed_override
+                .clone()
+                .unwrap_or_else(|| disk.clone()),
+            sector_size: self.sector_size,
+            data: Arc::clone(&self.data),
+            fail_at: self.fail_at,
+            finished: false,
+        }))
+    }
+}
+
+pub struct FakeReadSession {
+    observed: DiskInfo,
+    sector_size: u32,
+    data: Arc<Vec<u8>>,
+    fail_at: Option<u64>,
+    finished: bool,
+}
+
+impl FakeReadSession {
+    /// `finish` 가 호출됐는가. 원본을 닫지 않는 회귀를 잡는다.
+    pub fn was_finished(&self) -> bool {
+        self.finished
+    }
+}
+
+impl ReadSession for FakeReadSession {
+    fn observed(&self) -> &DiskInfo {
+        &self.observed
+    }
+    fn sector_size(&self) -> u32 {
+        self.sector_size
+    }
+    fn total_bytes(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DeviceError> {
+        let ss = self.sector_size as u64;
+        if !offset.is_multiple_of(ss) || !(buf.len() as u64).is_multiple_of(ss) {
+            return Err(DeviceError::Io {
+                code: 87,
+                message: "정렬되지 않은 읽기 (길이와 오프셋은 섹터 배수여야 함)".into(),
+            });
+        }
+        if let Some(limit) = self.fail_at {
+            if offset + buf.len() as u64 > limit {
+                return Err(DeviceError::MediaChanged);
+            }
+        }
+        let end = offset as usize + buf.len();
+        if end > self.data.len() {
+            return Err(DeviceError::Io {
+                code: 112,
+                message: "장치 끝을 넘어선 읽기".into(),
+            });
+        }
+        buf.copy_from_slice(&self.data[offset as usize..end]);
+        Ok(())
+    }
+
+    fn finish(mut self: Box<Self>) -> Result<(), DeviceError> {
+        self.finished = true;
+        Ok(())
     }
 }
 
@@ -402,5 +525,29 @@ mod tests {
         let w = FakeWriter::new(1024, 512).with_observed(swapped);
         let s = w.open(&selected).unwrap();
         assert!(safety::confirm_identity(&selected, s.observed()).is_err());
+    }
+
+    #[test]
+    fn a_fake_source_reads_back_what_it_was_given() {
+        let data: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let r = FakeReader::new(data.clone(), 512);
+        let disk = FakeEnumerator::sample().list_disks().unwrap()[1].clone();
+        let mut s = r.open(&disk).unwrap();
+        assert_eq!(s.total_bytes(), 4096);
+        assert_eq!(s.sector_size(), 512);
+        let mut buf = vec![0u8; 1024];
+        s.read_at(512, &mut buf).unwrap();
+        assert_eq!(buf, data[512..1536]);
+    }
+
+    #[test]
+    fn a_fake_source_refuses_unaligned_reads_like_a_real_device_does() {
+        // 실제 장치가 강제하는 규칙을 가짜에서도 강제해야, 정렬 버그가
+        // 실물에서 처음 드러나지 않는다.
+        let r = FakeReader::new(vec![0u8; 4096], 512);
+        let disk = FakeEnumerator::sample().list_disks().unwrap()[1].clone();
+        let mut s = r.open(&disk).unwrap();
+        assert!(s.read_at(1, &mut vec![0u8; 512]).is_err());
+        assert!(s.read_at(0, &mut vec![0u8; 511]).is_err());
     }
 }

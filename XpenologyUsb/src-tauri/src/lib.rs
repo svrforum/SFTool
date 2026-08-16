@@ -53,6 +53,27 @@ fn writer() -> Box<dyn RawWriter> {
     }
 }
 
+/// 실행 환경에 맞는 읽기 구현.
+fn reader() -> Box<dyn device::RawReader> {
+    #[cfg(windows)]
+    {
+        Box::new(device::windows::WindowsRawReader::new())
+    }
+    #[cfg(not(windows))]
+    {
+        // 개발 환경에서는 파티션이 하나 있는 가짜 원본을 돌려준다.
+        // UI 흐름을 끝까지 눌러볼 수 있으면서 개발자의 디스크는 안전하다.
+        let mut img = vec![0x5Au8; 16 * 1024 * 1024];
+        img[..512].fill(0);
+        img[446 + 4] = 0x83;
+        img[446 + 8..446 + 12].copy_from_slice(&2048u32.to_le_bytes());
+        img[446 + 12..446 + 16].copy_from_slice(&14336u32.to_le_bytes());
+        img[510] = 0x55;
+        img[511] = 0xAA;
+        Box::new(device::fake::FakeReader::new(img, 512))
+    }
+}
+
 /// 취소 플래그.
 struct Flag(Arc<AtomicBool>);
 impl Cancel for Flag {
@@ -96,6 +117,76 @@ fn eject_disk(disk_number: u32) -> Result<(), String> {
         let _ = disk_number;
         Ok(())
     }
+}
+
+/// 원본 USB 를 분석해 복사할 양을 알려준다.
+///
+/// 대상은 건드리지 않는다. 확인 화면이 "복사할 양 4.98 GB" 를 보여주려면
+/// 복제를 시작하기 **전에** 이 값이 필요하다.
+#[tauri::command]
+fn analyze_source(disk_number: u32) -> Result<commands::SourcePlan, String> {
+    let enumerator = enumerator();
+    let protected = enumerator
+        .protected_disk_numbers()
+        .map_err(|e| format!("{e:?}"))?;
+    let disks = enumerator.list_disks().map_err(|e| format!("{e:?}"))?;
+    let disk = disks
+        .into_iter()
+        .find(|d| d.number == disk_number)
+        .ok_or_else(|| "선택한 USB를 찾을 수 없습니다".to_string())?;
+
+    core::cloner::analyze(reader().as_ref(), &disk, &protected)
+        .map(commands::SourcePlan::from)
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// USB 를 다른 USB 로 복제한다.
+#[tauri::command]
+async fn clone_disk(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    source: u32,
+    target: u32,
+    verify: bool,
+) -> Result<core::cloner::CloneSummary, String> {
+    state.cancel.store(false, Ordering::Relaxed);
+    let cancel = Arc::clone(&state.cancel);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let enumerator = enumerator();
+        let protected = enumerator
+            .protected_disk_numbers()
+            .map_err(|e| format!("{e:?}"))?;
+        let disks = enumerator.list_disks().map_err(|e| format!("{e:?}"))?;
+
+        // 번호로 지금 상태에서 다시 조회한다. 프런트엔드가 보낸 정보를
+        // 신뢰하지 않는다 — 목록을 만든 뒤 장치가 바뀌었을 수 있다.
+        let find = |n: u32| {
+            disks
+                .iter()
+                .find(|d| d.number == n)
+                .cloned()
+                .ok_or_else(|| format!("USB {n} 를 찾을 수 없습니다"))
+        };
+        let src = find(source)?;
+        let dst = find(target)?;
+
+        core::cloner::run(
+            core::cloner::CloneConfig { verify },
+            &src,
+            &dst,
+            &protected,
+            reader().as_ref(),
+            writer().as_ref(),
+            &Flag(cancel),
+            |ev| {
+                let _ = app.emit("progress", &ev);
+            },
+        )
+        .map_err(|e| format!("{e:?}"))
+    })
+    .await
+    .map_err(|e| format!("작업 스레드 오류: {e}"))?
 }
 
 #[tauri::command]
@@ -173,7 +264,9 @@ pub fn run() {
             is_simulated,
             write_image,
             cancel_write,
-            eject_disk
+            eject_disk,
+            analyze_source,
+            clone_disk
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -18,8 +18,10 @@
 mod eject;
 mod ioctl;
 mod raw;
+mod read;
 
 pub use raw::WindowsRawWriter;
+pub use read::WindowsRawReader;
 
 /// USB 를 안전하게 제거한다.
 ///

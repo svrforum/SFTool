@@ -70,6 +70,8 @@ pub enum Rejection {
     TooSmall { need: u64, have: u64 },
     /// 소스 이미지가 대상 디스크 위에 있다. 자기 자신을 덮어쓰게 된다.
     SourceOnTarget,
+    /// 원본과 대상이 같은 장치다.
+    SameDisk,
 }
 
 impl Rejection {
@@ -86,6 +88,7 @@ impl Rejection {
                 | Rejection::SourceOnTarget
                 | Rejection::SpannedVolume
                 | Rejection::ReadOnly
+                | Rejection::SameDisk
         )
     }
 }
@@ -204,6 +207,34 @@ pub fn can_write(
     Ok(())
 }
 
+/// 원본 A 를 대상 B 로 복제해도 되는가.
+///
+/// 순서가 중요하다. 원본을 먼저 확인하고, 같은 장치인지 보고, 마지막에 대상을
+/// 확인한다. 대상 확인이 통과해야 비로소 파괴적인 작업이 시작되기 때문이다.
+pub fn can_clone(
+    source: &DiskInfo,
+    target: &DiskInfo,
+    protected: &HashSet<u32>,
+    copy_bytes: u64,
+) -> Result<(), Rejection> {
+    // 원본도 목록에 보일 수 있는 장치여야 한다. 읽기만 한다고 해서 내장 디스크를
+    // 선택지로 내놓을 이유는 없다.
+    is_listable(source, protected)?;
+
+    // 같은 장치 판정은 **번호만으로** 한다.
+    //
+    // `identity_key` 를 함께 보면 안 된다. 같은 모델·같은 용량의 USB 두 개는
+    // 시리얼이 비어 있으면 키가 똑같아지고, 그러면 가장 흔한 복제 상황 —
+    // 같은 USB 를 두 개 사서 하나를 복사하는 것 — 이 통째로 막힌다.
+    // `identity_key` 는 시간이 지나며 장치가 바뀌었는지 보는 값이지,
+    // 지금 꽂혀 있는 두 장치를 구별하는 값이 아니다.
+    if source.number == target.number {
+        return Err(Rejection::SameDisk);
+    }
+
+    can_write(target, protected, copy_bytes, None)
+}
+
 /// 쓰기 직전, 열린 핸들에서 읽어온 실제 장치 정보가
 /// 사용자가 고른 그 장치가 맞는지 확인한다.
 ///
@@ -248,6 +279,8 @@ pub enum IdentityMismatch {
 mod tests {
     use super::*;
     use crate::core::model::VolumeInfo;
+    use crate::device::fake::FakeEnumerator;
+    use crate::device::UsbEnumerator;
 
     fn usb_disk(number: u32) -> DiskInfo {
         DiskInfo {
@@ -582,6 +615,84 @@ mod tests {
                 expected: 2,
                 actual: 3
             })
+        );
+    }
+
+    // --- 복제 인터록 ---
+
+    /// 표본에서 쓸 만한 USB 두 개를 꺼낸다.
+    fn two_sticks() -> (DiskInfo, DiskInfo, HashSet<u32>) {
+        let e = FakeEnumerator::sample();
+        let protected = e.protected_disk_numbers().unwrap();
+        let disks = e.list_disks().unwrap();
+        let usable: Vec<DiskInfo> = disks
+            .into_iter()
+            .filter(|d| availability(d, &protected).is_ready())
+            .collect();
+        assert!(
+            usable.len() >= 2,
+            "표본에 쓸 만한 USB 가 둘 이상 있어야 한다"
+        );
+        (usable[0].clone(), usable[1].clone(), protected)
+    }
+
+    #[test]
+    fn cloning_a_disk_onto_itself_is_refused() {
+        let (a, _, protected) = two_sticks();
+        assert_eq!(
+            can_clone(&a, &a, &protected, 1024),
+            Err(Rejection::SameDisk)
+        );
+    }
+
+    #[test]
+    fn two_identical_sticks_are_not_mistaken_for_one() {
+        // 같은 모델·같은 용량의 USB 두 개는 시리얼이 비어 있으면 identity_key 가
+        // 똑같아진다. 그걸로 같은 장치를 판정하면 **가장 흔한 복제 상황이 통째로
+        // 막힌다.** 번호만으로 판정해야 하는 이유다.
+        let (a, _, protected) = two_sticks();
+        let mut twin = a.clone();
+        twin.number = a.number + 100;
+        twin.volumes.clear();
+        assert_eq!(a.identity_key(), twin.identity_key());
+        assert!(can_clone(&a, &twin, &protected, 1024).is_ok());
+    }
+
+    #[test]
+    fn a_target_too_small_for_the_copied_region_is_refused() {
+        let (a, b, protected) = two_sticks();
+        let too_much = b.size_bytes + 1;
+        assert_eq!(
+            can_clone(&a, &b, &protected, too_much),
+            Err(Rejection::TooSmall {
+                need: too_much,
+                have: b.size_bytes
+            })
+        );
+    }
+
+    #[test]
+    fn an_internal_disk_cannot_be_a_clone_source() {
+        // 원본은 읽기만 하지만, 내장 디스크를 원본으로 고를 수 있게 두면
+        // 화면에 시스템 디스크가 나타난다. 그 자체가 위험하다.
+        let (_, b, protected) = two_sticks();
+        let e = FakeEnumerator::sample();
+        let internal = e
+            .list_disks()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.bus_type != BusType::Usb)
+            .expect("표본에 내장 디스크가 있어야 한다");
+        assert!(can_clone(&internal, &b, &protected, 1024).is_err());
+    }
+
+    #[test]
+    fn a_write_protected_target_is_refused() {
+        let (a, mut b, protected) = two_sticks();
+        b.is_read_only = true;
+        assert_eq!(
+            can_clone(&a, &b, &protected, 1024),
+            Err(Rejection::ReadOnly)
         );
     }
 }

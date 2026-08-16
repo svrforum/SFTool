@@ -27,6 +27,29 @@ pub struct DiskEntry {
     pub blocked_detail: Option<String>,
 }
 
+/// 원본 분석 결과. 확인 화면이 "복사할 양" 을 보여주는 데 쓴다.
+#[derive(Debug, Clone, Serialize)]
+pub struct SourcePlan {
+    pub bytes: u64,
+    /// 사람이 읽는 용량. 계산을 프런트엔드에 중복 구현하지 않는다.
+    pub size_label: String,
+    pub partitions: u32,
+    pub scheme: String,
+}
+
+impl From<crate::core::layout::Layout> for SourcePlan {
+    fn from(l: crate::core::layout::Layout) -> Self {
+        Self {
+            bytes: l.bytes,
+            size_label: format_bytes(l.bytes),
+            partitions: l.partitions,
+            scheme: match l.scheme {
+                crate::core::layout::Scheme::Mbr => "MBR".to_string(),
+            },
+        }
+    }
+}
+
 /// 사유를 UI 가 번역할 수 있는 안정적인 코드로 바꾼다.
 ///
 /// 문자열 자체를 넘기지 않는 이유는 언어 전환 때문이다. 백엔드가 한국어 문장을
@@ -41,6 +64,7 @@ fn reason_code(r: &Rejection) -> (&'static str, Option<String>) {
         Rejection::NoMedia => ("no_media", None),
         Rejection::SpannedVolume => ("spanned_volume", None),
         Rejection::SourceOnTarget => ("source_on_target", None),
+        Rejection::SameDisk => ("same_disk", None),
         // 아래는 감춰지는 사유라 UI 에 도달하지 않는다.
         Rejection::NotUsb(_) => ("not_usb", None),
         Rejection::DiskZero => ("disk_zero", None),
