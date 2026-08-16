@@ -114,3 +114,26 @@ pub trait RawWriter: Send + Sync {
     /// [`DeviceError::MediaChanged`] 가 난다.
     fn open(&self, disk: &DiskInfo) -> Result<Box<dyn WriteSession>, DeviceError>;
 }
+
+/// 읽기 전용 세션 — 열려 있는 **원본** 장치.
+///
+/// 쓰기 세션과 트레이트를 나눈 이유는 타입만 봐도 방향이 드러나게 하기 위해서다.
+/// 복제에서 원본과 대상을 뒤바꾸는 실수는 사용자의 데이터를 지우는 결과로
+/// 이어지므로, 원본 쪽에는 쓰는 수단이 아예 없어야 한다.
+pub trait ReadSession: Send {
+    /// 열린 핸들에서 직접 읽은 장치 정보. TOCTOU 확인용.
+    fn observed(&self) -> &DiskInfo;
+    fn sector_size(&self) -> u32;
+    fn total_bytes(&self) -> u64;
+    /// 한 덩어리를 읽는다. `offset` 과 `buf.len()` 은 섹터 크기의 배수여야 한다.
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DeviceError>;
+    fn finish(self: Box<Self>) -> Result<(), DeviceError>;
+}
+
+/// 원본 장치를 읽기용으로 연다.
+///
+/// 구현은 **잠그지 않고, 마운트를 해제하지 않고, 레이아웃을 지우지 않는다.**
+/// 원본은 사용자가 이미 잘 쓰고 있는 USB 이므로 복제가 그것을 건드려서는 안 된다.
+pub trait RawReader: Send + Sync {
+    fn open(&self, disk: &DiskInfo) -> Result<Box<dyn ReadSession>, DeviceError>;
+}
