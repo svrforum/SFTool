@@ -109,34 +109,44 @@ jobs:
 
       - run: npm run build
 
-      - name: Create and attach a virtual disk
+      - name: Create and attach virtual disks
         id: vhd
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $path = "$env:RUNNER_TEMP\xpenology-test.vhdx"
-          New-VHD -Path $path -SizeBytes 12GB -Dynamic | Out-Null
-          $disk = Mount-VHD -Path $path -Passthru | Get-Disk
-          Initialize-Disk -Number $disk.Number -PartitionStyle MBR -Confirm:$false
-          Write-Host "Virtual disk number: $($disk.Number)"
-          # Guard: never let the test target disk 0.
-          if ($disk.Number -eq 0) { throw "Got disk 0. Refusing to continue." }
-          "disk=$($disk.Number)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $paths = @()
+          $numbers = @()
+          foreach ($name in @('target', 'source')) {
+            $p = "$env:RUNNER_TEMP\xpenology-$name.vhdx"
+            New-VHD -Path $p -SizeBytes 12GB -Dynamic | Out-Null
+            $d = Mount-VHD -Path $p -Passthru | Get-Disk
+            Initialize-Disk -Number $d.Number -PartitionStyle MBR -Confirm:$false
+            Write-Host "$name disk number: $($d.Number)"
+            # Guard: never let the test target disk 0.
+            if ($d.Number -eq 0) { throw "Got disk 0. Refusing to continue." }
+            $paths += $p
+            $numbers += $d.Number
+          }
+          "disk=$($numbers[0])" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "source=$($numbers[1])" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "path=$($paths[0])" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "srcpath=$($paths[1])" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Write to it
         shell: powershell
         env:
           XPENOLOGY_TEST_DISK: ${{ steps.vhd.outputs.disk }}
+          XPENOLOGY_TEST_SOURCE: ${{ steps.vhd.outputs.source }}
         working-directory: XpenologyUsb/src-tauri
         run: cargo test --features vhd-tests --test vhd_write -- --test-threads=1 --nocapture
 
-      - name: Detach the virtual disk
+      - name: Detach the virtual disks
         if: always()
         shell: powershell
         run: |
-          $p = "${{ steps.vhd.outputs.path }}"
-          if ($p -and (Test-Path $p)) {
-            Dismount-VHD -Path $p -ErrorAction SilentlyContinue
-            Remove-Item $p -Force -ErrorAction SilentlyContinue
+          foreach ($p in @("${{ steps.vhd.outputs.path }}", "${{ steps.vhd.outputs.srcpath }}")) {
+            if ($p -and (Test-Path $p)) {
+              Dismount-VHD -Path $p -ErrorAction SilentlyContinue
+              Remove-Item $p -Force -ErrorAction SilentlyContinue
+            }
           }

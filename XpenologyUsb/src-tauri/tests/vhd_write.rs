@@ -27,15 +27,19 @@
 //! `XPENOLOGY_TEST_DISK` 환경 변수로 넘긴다. 그 변수가 없으면 테스트는 건너뛴다 —
 //! 실수로 개발자의 실제 디스크를 대상으로 도는 일이 없어야 한다.
 //!
+//! 복제 테스트는 원본 쪽 가상 디스크가 하나 더 있어야 하므로
+//! `XPENOLOGY_TEST_SOURCE` 도 함께 본다. 없으면 그 테스트만 건너뛴다.
+//!
 //! ```powershell
 //! $env:XPENOLOGY_TEST_DISK = "2"
+//! $env:XPENOLOGY_TEST_SOURCE = "3"
 //! cargo test --features vhd-tests --test vhd_write -- --test-threads=1
 //! ```
 
 #![cfg(all(windows, feature = "vhd-tests"))]
 
 use xpenologyusb_lib::core::model::{BusType, DiskInfo};
-use xpenologyusb_lib::device::windows::WindowsRawWriter;
+use xpenologyusb_lib::device::windows::{WindowsRawReader, WindowsRawWriter};
 use xpenologyusb_lib::device::{RawWriter, UsbEnumerator};
 
 /// 대상 디스크 번호. 없으면 테스트를 건너뛴다.
@@ -193,4 +197,113 @@ fn rejects_unaligned_requests() {
         "정렬되지 않은 길이가 통과했다"
     );
     session.finish().expect("마무리 실패");
+}
+
+/// 원본 디스크 번호. 없으면 복제 테스트를 건너뛴다.
+fn source_disk() -> Option<u32> {
+    std::env::var("XPENOLOGY_TEST_SOURCE")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|n| *n != 0)
+}
+
+/// 파티션 하나가 있는 이미지를 만든다. `end_lba` 에서 끝난다.
+fn loader_like_image(bytes: usize, end_lba: u32) -> Vec<u8> {
+    let mut v: Vec<u8> = (0..bytes).map(|i| ((i * 2654435761) >> 13) as u8).collect();
+    for b in v[..512].iter_mut() {
+        *b = 0;
+    }
+    let off = 446;
+    v[off + 4] = 0x83;
+    v[off + 8..off + 12].copy_from_slice(&2048u32.to_le_bytes());
+    v[off + 12..off + 16].copy_from_slice(&(end_lba - 2048).to_le_bytes());
+    v[510] = 0x55;
+    v[511] = 0xAA;
+    v
+}
+
+/// **가상 디스크 하나를 다른 하나로 복제한다.**
+///
+/// 여기서만 확인되는 것: 원본을 잠그지 않고 읽는 것이 실제로 허용되는지,
+/// 복제 도중 대상의 볼륨이 다시 마운트되지 않는지, 두 핸들을 동시에 열어도
+/// 문제가 없는지. 단위 테스트의 가짜 장치는 이 중 어느 것도 재현하지 못한다.
+#[test]
+fn clones_one_virtual_disk_onto_another() {
+    let (Some(src_n), Some(dst_n)) = (source_disk(), target_disk()) else {
+        eprintln!("XPENOLOGY_TEST_SOURCE 또는 XPENOLOGY_TEST_DISK 가 없어 건너뛴다");
+        return;
+    };
+    assert_ne!(src_n, dst_n, "원본과 대상이 같은 디스크다");
+
+    // 원본에 로더처럼 생긴 이미지를 심는다.
+    let image = loader_like_image(6 * 1024 * 1024, 8192); // 4MiB 까지가 파티션
+    let src_disk = describe(src_n);
+    write_and_verify(&src_disk, &image, "seed-source");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    let dst_disk = describe(dst_n);
+    let protected = xpenologyusb_lib::device::windows::WindowsEnumerator::new()
+        .protected_disk_numbers()
+        .expect("보호 목록을 읽지 못했다");
+
+    let summary = xpenologyusb_lib::core::cloner::run(
+        xpenologyusb_lib::core::cloner::CloneConfig { verify: true },
+        &src_disk,
+        &dst_disk,
+        &protected,
+        &WindowsRawReader::new(),
+        &WindowsRawWriter::new(),
+        &xpenologyusb_lib::core::pipeline::NeverCancel,
+        |_| {},
+    )
+    .expect("복제에 실패했다");
+
+    // 파티션 끝까지만 복사돼야 한다. 6MiB 장치에서 4MiB 다.
+    assert_eq!(summary.bytes_copied, 4 * 1024 * 1024);
+
+    // 대상에서 되읽어 원본과 대조한다. verify:true 가 이미 확인했지만,
+    // 그것은 "쓴 것" 과 "장치에 있는 것" 의 비교다. 여기서는 "원본" 과
+    // 비교한다 — 잘못된 범위를 복사했다면 검증은 통과하고 이것은 실패한다.
+    let mut back = vec![0u8; 4 * 1024 * 1024];
+    let mut s = WindowsRawWriter::new()
+        .open(&dst_disk)
+        .expect("되읽기용으로 열지 못했다");
+    s.read_at(0, &mut back).expect("되읽기 실패");
+    assert_eq!(back, image[..4 * 1024 * 1024], "복제본이 원본과 다르다");
+    s.finish().expect("마무리 실패");
+}
+
+/// 이미 내용이 있는 대상으로 복제한다. 재쓰기 경로.
+#[test]
+fn clones_onto_a_target_that_already_has_a_layout() {
+    let (Some(src_n), Some(dst_n)) = (source_disk(), target_disk()) else {
+        eprintln!("XPENOLOGY_TEST_SOURCE 또는 XPENOLOGY_TEST_DISK 가 없어 건너뛴다");
+        return;
+    };
+
+    let src_disk = describe(src_n);
+    let dst_disk = describe(dst_n);
+
+    // 대상에 파티션 테이블이 남아 있는 상태를 만든다.
+    write_and_verify(&dst_disk, &loader_like_image(4 * 1024 * 1024, 4096), "old");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    write_and_verify(&src_disk, &loader_like_image(6 * 1024 * 1024, 8192), "seed");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    let protected = xpenologyusb_lib::device::windows::WindowsEnumerator::new()
+        .protected_disk_numbers()
+        .expect("보호 목록을 읽지 못했다");
+
+    xpenologyusb_lib::core::cloner::run(
+        xpenologyusb_lib::core::cloner::CloneConfig { verify: false },
+        &src_disk,
+        &dst_disk,
+        &protected,
+        &WindowsRawReader::new(),
+        &WindowsRawWriter::new(),
+        &xpenologyusb_lib::core::pipeline::NeverCancel,
+        |_| {},
+    )
+    .expect("이미 레이아웃이 있는 대상으로의 복제가 실패했다");
 }
