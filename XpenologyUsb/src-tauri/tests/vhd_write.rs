@@ -88,12 +88,35 @@ fn read_back(disk: &DiskInfo, len: usize, label: &str) -> Vec<u8> {
     buf
 }
 
-/// 대상 디스크 번호. 없으면 테스트를 건너뛴다.
-fn target_disk() -> Option<u32> {
-    std::env::var("XPENOLOGY_TEST_DISK")
-        .ok()
+/// 환경 변수에서 디스크 번호를 읽는다. 없으면 건너뛴다 — **단, CI 에서는 아니다.**
+///
+/// 개발자 기계에서 실수로 실제 디스크를 대상으로 도는 일이 없어야 하므로
+/// 변수가 없으면 건너뛰는 것이 맞다. 그런데 CI 에서도 똑같이 건너뛰면,
+/// 워크플로가 변수를 넘기다 망가졌을 때 잡이 **초록불로 통과한다.** 아무것도
+/// 실행하지 않은 것과 전부 통과한 것이 구분되지 않는 것이다.
+///
+/// 이 프로젝트는 이미 그 실수를 한 적이 있다 — 값을 못 읽은 것을 "매체 없음"
+/// 이라는 사실로 읽어 USB 가 통째로 목록에서 사라졌다. 없음은 사실이 아니다.
+/// 그래서 CI 안에서는 변수가 빠진 것을 실패로 다룬다.
+fn disk_from_env(var: &str) -> Option<u32> {
+    let raw = std::env::var(var).ok();
+    let parsed = raw
+        .as_deref()
         .and_then(|s| s.trim().parse::<u32>().ok())
-        .filter(|n| *n != 0) // 디스크 0 은 어떤 경우에도 대상이 아니다.
+        .filter(|n| *n != 0); // 디스크 0 은 어떤 경우에도 대상이 아니다.
+
+    if parsed.is_none() && std::env::var("CI").is_ok() {
+        panic!(
+            "CI 인데 {var} 가 쓸 수 없는 값이다 (실제 값: {raw:?}). \
+             건너뛰면 아무것도 실행하지 않고 초록불이 된다."
+        );
+    }
+    parsed
+}
+
+/// 대상 디스크 번호. 없으면 테스트를 건너뛴다 (CI 에서는 실패한다).
+fn target_disk() -> Option<u32> {
+    disk_from_env("XPENOLOGY_TEST_DISK")
 }
 
 /// 열거자에서 대상 디스크 정보를 가져온다.
@@ -247,10 +270,7 @@ fn rejects_unaligned_requests() {
 
 /// 원본 디스크 번호. 없으면 복제 테스트를 건너뛴다.
 fn source_disk() -> Option<u32> {
-    std::env::var("XPENOLOGY_TEST_SOURCE")
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .filter(|n| *n != 0)
+    disk_from_env("XPENOLOGY_TEST_SOURCE")
 }
 
 /// 파티션 하나가 있는 이미지를 만든다. `end_lba` 에서 끝난다.
