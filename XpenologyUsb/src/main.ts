@@ -121,6 +121,26 @@ function fmtEta(secs: number): string {
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
+/**
+ * 클릭을 받는 data 속성들.
+ *
+ * **버튼을 추가할 때 여기에도 넣어야 한다.** 안전 제거 버튼과 새로고침 버튼이
+ * 이 목록에서 빠져 있었고, 그래서 눌러도 아무 반응이 없었다 — 처리 코드는
+ * 멀쩡히 있는데 `closest()` 가 요소를 찾지 못해 도달하지 못했다.
+ * 아래 개발용 검사가 렌더된 화면과 이 목록을 대조해 누락을 잡는다.
+ */
+const ACTIONS = [
+  'data-disk',
+  'data-loader',
+  'data-go',
+  'data-lang',
+  'data-cancel',
+  'data-eject',
+  'data-refresh',
+] as const;
+
+const ACTION_SELECTOR = ACTIONS.map((a) => `[${a}]`).join(',');
+
 /** 선택된 디스크. 목록이 갱신되며 사라졌을 수 있으므로 매번 조회한다. */
 function selected(): DiskEntry | undefined {
   return state.disks.find((d) => d.number === state.selectedDisk);
@@ -386,12 +406,33 @@ function render() {
 
   // 배너가 맨 위, 그 아래 언어 전환. 순서가 겹침을 막는다.
   app.innerHTML = `${banner}${lang}${body}<footer>${foot}</footer>`;
+  warnUnhandledActions();
+}
+
+/**
+ * 화면에 있는데 클릭 처리기가 못 받는 버튼이 있는지 검사한다.
+ *
+ * 이 검사가 없었다면 안전 제거 버튼이 동작하지 않는 것을 사용자가 눌러보고
+ * 알려줄 때까지 몰랐을 것이다. 실제로 그랬다.
+ *
+ * 화면당 버튼이 몇 개뿐이라 항상 돌려도 비용이 없다. 콘솔에만 남으므로
+ * 사용자에게는 보이지 않지만, 개발 중에는 즉시 눈에 띈다.
+ */
+function warnUnhandledActions() {
+  const buttons = app.querySelectorAll('button');
+  buttons.forEach((b) => {
+    const handled = ACTIONS.some((a) => b.hasAttribute(a));
+    if (!handled) {
+      console.error(
+        '클릭 처리기가 받지 못하는 버튼:',
+        b.outerHTML.slice(0, 120),
+      );
+    }
+  });
 }
 
 app.addEventListener('click', (e) => {
-  const el = (e.target as HTMLElement).closest<HTMLElement>(
-    '[data-disk],[data-loader],[data-go],[data-lang],[data-cancel]',
-  );
+  const el = (e.target as HTMLElement).closest<HTMLElement>(ACTION_SELECTOR);
   if (!el) return;
 
   if (el.dataset.refresh) {
