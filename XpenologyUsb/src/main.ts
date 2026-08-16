@@ -8,44 +8,27 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { t, getLang, setLang, reasonText, type Lang } from './i18n';
+import { t, getLang, setLang, type Lang } from './i18n';
+import {
+  ACTION_SELECTOR,
+  ACTIONS,
+  diskItem,
+  ejectBlock,
+  esc,
+  fmtBytes,
+  fmtEta,
+  nl,
+  normalizeFailure,
+  segs,
+  type DiskEntry,
+  type Failure,
+  type ProgressEvent,
+  type Stage,
+} from './ui';
 import './styles.css';
-
-type DiskEntry = {
-  number: number;
-  name: string;
-  size_bytes: number;
-  size_label: string;
-  drive_letters: string[];
-  ready: boolean;
-  blocked_reason: string | null;
-  blocked_detail: string | null;
-};
 
 type LoaderId = 'MShell' | 'Rr';
 type Step = 1 | 2 | 3 | 4 | 5 | 6;
-
-type Stage =
-  | 'Resolving'
-  | 'Downloading'
-  | 'Extracting'
-  | 'Preparing'
-  | 'Writing'
-  | 'Verifying'
-  | 'Finishing';
-
-type ProgressEvent = {
-  stage: Stage;
-  percent: number | null;
-  done_bytes: number;
-  total_bytes: number | null;
-  bytes_per_sec: number | null;
-  eta_secs: number | null;
-  completed: Stage[];
-  detail: string | null;
-};
-
-type Failure = { code: string; detail?: string };
 
 type RunSummary = {
   loader: string;
@@ -101,86 +84,11 @@ function plannedStages(): Stage[] {
   return s;
 }
 
-function fmtBytes(n: number): string {
-  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  if (n < 1000) return `${n} B`;
-  let v = n;
-  let i = 0;
-  while (v >= 1000 && i < u.length - 1) {
-    v /= 1000;
-    i++;
-  }
-  return `${v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)} ${u[i]}`;
-}
-
-function fmtEta(secs: number): string {
-  if (secs < 5) return t('eta_almost');
-  if (secs < 60) return t('eta_seconds', String(secs));
-  return t('eta_minutes', String(Math.ceil(secs / 60)));
-}
-
 const app = document.querySelector<HTMLDivElement>('#app')!;
-
-/**
- * 클릭을 받는 data 속성들.
- *
- * **버튼을 추가할 때 여기에도 넣어야 한다.** 안전 제거 버튼과 새로고침 버튼이
- * 이 목록에서 빠져 있었고, 그래서 눌러도 아무 반응이 없었다 — 처리 코드는
- * 멀쩡히 있는데 `closest()` 가 요소를 찾지 못해 도달하지 못했다.
- * 아래 개발용 검사가 렌더된 화면과 이 목록을 대조해 누락을 잡는다.
- */
-const ACTIONS = [
-  'data-disk',
-  'data-loader',
-  'data-go',
-  'data-lang',
-  'data-cancel',
-  'data-eject',
-  'data-refresh',
-] as const;
-
-const ACTION_SELECTOR = ACTIONS.map((a) => `[${a}]`).join(',');
 
 /** 선택된 디스크. 목록이 갱신되며 사라졌을 수 있으므로 매번 조회한다. */
 function selected(): DiskEntry | undefined {
   return state.disks.find((d) => d.number === state.selectedDisk);
-}
-
-function esc(s: string): string {
-  return s.replace(
-    /[&<>"']/g,
-    (c) =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[
-        c
-      ]!,
-  );
-}
-
-/** 줄바꿈을 <br> 로. 제목에만 쓴다. */
-function nl(s: string): string {
-  return esc(s).replace(/\n/g, '<br>');
-}
-
-function segs(active: number): string {
-  return `<div class="steps">${[1, 2, 3, 4]
-    .map((i) => `<i class="seg${i <= active ? ' on' : ''}"></i>`)
-    .join('')}</div>`;
-}
-
-function diskItem(d: DiskEntry): string {
-  const letters = d.drive_letters.length ? ` · ${d.drive_letters.join(' ')}` : '';
-  const sub = d.ready
-    ? `${esc(d.size_label)}${esc(letters)}`
-    : reasonText(d.blocked_reason ?? '', d.blocked_detail);
-  return `
-    <button class="item" data-disk="${d.number}" ${d.ready ? '' : 'disabled'}
-            aria-selected="${state.selectedDisk === d.number}">
-      <span class="body">
-        <span class="title">${esc(d.name)}</span>
-        <span class="sub${d.ready ? '' : ' warn'}">${esc(sub)}</span>
-      </span>
-      <span class="radio"></span>
-    </button>`;
 }
 
 function loaderItem(id: LoaderId, name: string, sub: string, badge: boolean): string {
@@ -194,23 +102,6 @@ function loaderItem(id: LoaderId, name: string, sub: string, badge: boolean): st
       </span>
       <span class="radio"></span>
     </button>`;
-}
-
-/** 완료 화면의 안전 제거 영역. */
-function ejectBlock(): string {
-  if (state.eject === 'ok') {
-    return `<div class="written ok">✓ ${esc(t('eject_ok'))}</div>`;
-  }
-  if (state.eject === 'fail') {
-    return `<div class="eject-fail">
-        <b>${esc(t('eject_fail'))}</b><br>${esc(t('eject_fail_why'))}
-        <div><button class="mini" data-eject="1">${esc(t('eject'))}</button></div>
-      </div>`;
-  }
-  const busy = state.eject === 'busy';
-  return `<div><button class="mini" data-eject="1" ${busy ? 'disabled' : ''}>${esc(
-    busy ? t('ejecting') : t('eject'),
-  )}</button></div>`;
 }
 
 function render() {
@@ -241,7 +132,9 @@ function render() {
         <div class="list">
           ${
             usable
-              ? state.disks.map(diskItem).join('')
+              ? state.disks
+                  .map((d) => diskItem(d, state.selectedDisk))
+                  .join('')
               : `<div class="empty">${esc(t('step1_empty'))}
                    <div class="hint">${esc(t('step1_empty_hint'))}</div>
                  </div>`
@@ -392,7 +285,7 @@ function render() {
           <p class="lead">${esc(t('done_lead'))}</p>
           ${written}
           ${verified}
-          ${ejectBlock()}
+          ${ejectBlock(state.eject)}
         </div>
         <div class="note explain">
           <span>ℹ</span>
@@ -533,42 +426,6 @@ async function doEject() {
     state.eject = 'fail';
   }
   render();
-}
-
-/**
- * 백엔드 오류를 UI 가 아는 코드로 바꾼다.
- *
- * 원문 메시지는 **항상 함께 보여준다.** 예전에는 코드가 매칭되면 원문을
- * 버렸는데, 백엔드가 거기에 "볼륨 2/2 잠금, 파티션 테이블 초기화 실패" 같은
- * 진짜 원인을 담아 보내고 있었다. 친절한 제목만 남기고 그걸 버리면
- * 사용자도 나도 원인을 알 수 없다.
- */
-function normalizeFailure(err: unknown): Failure {
-  const s = typeof err === 'string' ? err : JSON.stringify(err);
-  const map: Record<string, string> = {
-    NeedsElevation: 'needs_elevation',
-    Locked: 'locked',
-    WriteDenied: 'write_denied',
-    MediaChanged: 'media_changed',
-    IdentityChanged: 'identity_changed',
-  };
-
-  // 백엔드가 코드 5 로 감싼 쓰기 거부. 준비 상태가 메시지에 들어 있다.
-  if (s.includes('쓰기를 거부') || s.includes('refused the write')) {
-    return { code: 'write_denied', detail: cleanDetail(s) };
-  }
-  for (const [k, v] of Object.entries(map)) {
-    if (s.includes(k)) return { code: v, detail: cleanDetail(s) };
-  }
-  return { code: 'generic', detail: cleanDetail(s) };
-}
-
-/** Rust 디버그 표현에서 사람이 읽을 부분만 남긴다. */
-function cleanDetail(s: string): string {
-  // Device(Io { code: 5, message: "..." }) 형태에서 message 만 꺼낸다.
-  const m = s.match(/message:\s*"((?:[^"\\]|\\.)*)"/);
-  const body = m ? m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"') : s;
-  return body.slice(0, 600);
 }
 
 /** 브라우저 미리보기에서 진행 화면을 확인하기 위한 모의 실행. */
