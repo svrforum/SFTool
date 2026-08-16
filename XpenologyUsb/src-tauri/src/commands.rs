@@ -41,6 +41,7 @@ fn reason_code(r: &Rejection) -> (&'static str, Option<String>) {
         Rejection::NoMedia => ("no_media", None),
         Rejection::SpannedVolume => ("spanned_volume", None),
         Rejection::SourceOnTarget => ("source_on_target", None),
+        Rejection::SameDisk => ("same_disk", None),
         // 아래는 감춰지는 사유라 UI 에 도달하지 않는다.
         Rejection::NotUsb(_) => ("not_usb", None),
         Rejection::DiskZero => ("disk_zero", None),
