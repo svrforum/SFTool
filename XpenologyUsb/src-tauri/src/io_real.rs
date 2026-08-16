@@ -480,6 +480,51 @@ mod tests {
         assert_eq!(got, body(0, 100000), "겹쳐 붙인 몸통을 그대로 돌려줬다");
     }
 
+    /// 어긋난 206 의 몸통이 **남은 양과 정확히 같으면** 총량이 맞아떨어진다.
+    ///
+    /// 위 검사만으로는 시작 위치를 실제로 보는지 알 수 없다. 거기서는 이어붙인
+    /// 몸통이 140% 가 되어 **총량 초과 검사**가 먼저 걸러내기 때문에, 시작 위치를
+    /// 아예 보지 않아도 통과한다. 실제로 리버트해 보니 그랬다 — 시작 위치 검사를
+    /// 통째로 들어내도 그 검사는 초록불이었다.
+    ///
+    /// 총량이 딱 맞는 이 모양에서만 드러난다. 받은 것은 40000 바이트 뒤에 다시
+    /// 0 부터 시작하는 몸통이라 내용은 엉망인데, 크기는 정확히 100000 이다.
+    /// 크기만 보는 코드는 이것을 완성본으로 넘긴다.
+    #[test]
+    fn a_resume_that_starts_somewhere_else_is_not_spliced_on() {
+        let url = serve(|n, range| {
+            let start = range.unwrap_or(0) as usize;
+            if n == 0 {
+                let mut v = head("Content-Length: 100000\r\nAccept-Ranges: bytes");
+                v.extend_from_slice(&body(0, 40000));
+                return v;
+            }
+            if n == 1 {
+                // 40000 부터 달라고 했는데 0 부터 보낸다. 길이는 남은 양과 같다.
+                let mut v = b"HTTP/1.1 206 Partial Content\r\nConnection: close\r\n\
+                     Content-Range: bytes 0-59999/100000\r\nContent-Length: 60000\r\n\r\n"
+                    .to_vec();
+                v.extend_from_slice(&body(0, 60000));
+                return v;
+            }
+            let mut v = format!(
+                "HTTP/1.1 206 Partial Content\r\nConnection: close\r\n\
+                 Content-Range: bytes {start}-99999/100000\r\nContent-Length: {}\r\n\r\n",
+                100000 - start
+            )
+            .into_bytes();
+            v.extend_from_slice(&body(start, 100000));
+            v
+        });
+
+        let got = get(&url).expect("결국은 받아내야 한다");
+        assert_eq!(
+            got,
+            body(0, 100000),
+            "요청한 위치에서 시작하지 않는 몸통을 이어 붙였다"
+        );
+    }
+
     /// Range 를 보내지 않았는데 206 이 오면, 그 몸통은 파일 전체가 아니다.
     ///
     /// 전체 크기를 그 응답의 Content-Length 에서 가져오면 "받은 만큼이 전부" 가
