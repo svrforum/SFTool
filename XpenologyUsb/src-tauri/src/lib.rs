@@ -126,13 +126,16 @@ fn eject_disk(disk_number: u32) -> Result<(), String> {
 #[tauri::command]
 fn analyze_source(disk_number: u32) -> Result<commands::SourcePlan, String> {
     let enumerator = enumerator();
+    let protected = enumerator
+        .protected_disk_numbers()
+        .map_err(|e| format!("{e:?}"))?;
     let disks = enumerator.list_disks().map_err(|e| format!("{e:?}"))?;
     let disk = disks
         .into_iter()
         .find(|d| d.number == disk_number)
         .ok_or_else(|| "선택한 USB를 찾을 수 없습니다".to_string())?;
 
-    core::cloner::analyze(reader().as_ref(), &disk)
+    core::cloner::analyze(reader().as_ref(), &disk, &protected)
         .map(commands::SourcePlan::from)
         .map_err(|e| format!("{e:?}"))
 }

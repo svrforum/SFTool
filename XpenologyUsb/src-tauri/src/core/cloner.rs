@@ -68,6 +68,9 @@ impl From<SinkError> for CloneError {
     fn from(e: SinkError) -> Self {
         match e {
             SinkError::Source(s) => CloneError::Source(s),
+            // 레이아웃 판정이 최소 한 섹터를 보장하므로 복제에서는 도달할 수
+            // 없어야 한다. 도달했다면 원본이 도중에 사라진 것이다.
+            SinkError::EmptySource => CloneError::Source("원본에서 읽은 내용이 없습니다".into()),
             SinkError::Device(d) => CloneError::Device(d),
             SinkError::TooSmall { need, have } => {
                 CloneError::Rejected(Rejection::TooSmall { need, have })
@@ -81,7 +84,19 @@ impl From<SinkError> for CloneError {
 /// 원본을 열어 복사할 범위만 알아내고 닫는다.
 ///
 /// 확인 화면에서 "복사할 양" 을 미리 보여주기 위한 것이다. 대상은 건드리지 않는다.
-pub fn analyze(reader: &dyn RawReader, source: &DiskInfo) -> Result<Layout, CloneError> {
+///
+/// 읽기만 하는데도 안전 규칙을 먼저 통과시키는 이유는, 그러지 않으면 이 함수가
+/// **아무 디스크나 열 수 있는 통로**가 되기 때문이다. 열거자는 일부러 걸러내지
+/// 않고 디스크 0 과 내장 디스크까지 전부 돌려주므로, 여기서 막지 않으면 판정이
+/// 장치 계층의 버스 검사 하나에만 걸리게 된다. 인터록은 `safety` 가 약속한
+/// 자리에 있어야 한다.
+pub fn analyze(
+    reader: &dyn RawReader,
+    source: &DiskInfo,
+    protected: &HashSet<u32>,
+) -> Result<Layout, CloneError> {
+    safety::is_listable(source, protected).map_err(CloneError::Rejected)?;
+
     let mut s = reader.open(source)?;
     safety::confirm_identity(source, s.observed())
         .map_err(|_| CloneError::SourceIdentityChanged)?;
@@ -252,6 +267,10 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(e, CloneError::Layout(LayoutError::NoSignature)));
+        // 열리지도 않아야 한다. 실제 구현은 `open` 안에서 파티션 테이블을 지우고
+        // 앞 1MiB 를 0으로 덮으므로, 여기를 보지 않으면 "쓰기가 없었다" 만으로
+        // 무사하다고 착각하게 된다.
+        assert!(!writer.was_opened(), "대상이 열렸다 — 이미 지워진 뒤다");
         assert!(writer.write_offsets().is_empty(), "대상에 쓰기가 일어났다");
         assert!(!writer.was_finished());
     }
@@ -279,6 +298,7 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(e, CloneError::Layout(LayoutError::Gpt)));
+        assert!(!writer.was_opened(), "대상이 열렸다 — 이미 지워진 뒤다");
         assert!(writer.write_offsets().is_empty());
     }
 
@@ -301,6 +321,7 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(e, CloneError::Rejected(Rejection::SameDisk)));
+        assert!(!writer.was_opened(), "대상이 열렸다 — 이미 지워진 뒤다");
         assert!(writer.write_offsets().is_empty());
     }
 
@@ -431,16 +452,36 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(e, CloneError::Canceled));
+        assert!(!writer.was_opened(), "취소했는데 대상이 열렸다");
         assert!(writer.write_offsets().is_empty());
     }
 
     #[test]
     fn analyze_reports_the_copy_size_without_touching_anything() {
-        let (a, _, _) = sticks();
+        let (a, _, protected) = sticks();
         let reader = FakeReader::new(source_image(8 * 1024 * 1024, 8192), SECTOR);
-        let l = analyze(&reader, &a).unwrap();
+        let l = analyze(&reader, &a, &protected).unwrap();
         assert_eq!(l.bytes, 4 * 1024 * 1024);
         assert_eq!(l.partitions, 1);
+    }
+
+    #[test]
+    fn analyze_refuses_a_disk_that_should_never_be_listed() {
+        // 열거자는 일부러 걸러내지 않고 내장 디스크까지 전부 돌려준다.
+        // 이 통로로 그런 디스크를 열 수 있으면 안 된다.
+        let e = FakeEnumerator::sample();
+        let protected = e.protected_disk_numbers().unwrap();
+        let internal = e
+            .list_disks()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.bus_type != crate::core::model::BusType::Usb)
+            .expect("표본에 내장 디스크가 있어야 한다");
+        let reader = FakeReader::new(source_image(8 * 1024 * 1024, 8192), SECTOR);
+        assert!(matches!(
+            analyze(&reader, &internal, &protected).unwrap_err(),
+            CloneError::Rejected(_)
+        ));
     }
 
     #[test]
@@ -466,6 +507,7 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(e, CloneError::SourceIdentityChanged));
+        assert!(!writer.was_opened(), "대상이 열렸다 — 이미 지워진 뒤다");
         assert!(writer.write_offsets().is_empty());
     }
 }

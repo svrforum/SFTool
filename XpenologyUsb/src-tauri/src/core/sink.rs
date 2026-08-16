@@ -49,6 +49,10 @@ pub struct SinkOutcome {
 pub enum SinkError {
     /// 원본 스트림을 읽지 못했다.
     Source(String),
+    /// 원본이 한 바이트도 주지 않았다.
+    ///
+    /// 이것을 성공으로 처리하면 안 되는 이유는 [`stream`] 안에 적어 두었다.
+    EmptySource,
     Device(DeviceError),
     TooSmall {
         need: u64,
@@ -150,11 +154,38 @@ pub fn stream<F: FnMut(ProgressEvent)>(
         last_t = now;
     }
 
+    // 한 바이트도 오지 않았다면 성공이 아니다.
+    //
+    // 여기까지 왔다는 것은 `RawWriter::open` 이 이미 대상의 파티션 테이블을
+    // 지운 뒤라는 뜻이다. 그대로 Ok 를 돌려주면 `verify` 는 `while pos < 0` 이라
+    // 한 바퀴도 돌지 않고 빈 해시끼리 비교해 통과하고, 사용자는 **USB 가 비워진
+    // 채로** "성공했고 검증까지 됐다" 를 보게 된다. 빈 이미지는 어떤 경우에도
+    // 정상이 아니므로 여기서 끊는다.
+    //
+    // 굽기 경로에서 실제로 도달할 수 있다: 서버가 Content-Length 없이 빈 본문을
+    // 주거나, zip 안의 이미지 항목 크기가 0 이면 이 상태가 된다.
+    if offset == 0 {
+        return Err(SinkError::EmptySource);
+    }
+
     // 보류해 둔 맨 앞을 이제 쓴다. 여기서 비로소 장치에 유효한 파티션 테이블이
     // 생기지만, 나머지는 이미 다 쓰인 뒤라 윈도우가 볼륨을 마운트해도 늦다.
     if !holdback.is_empty() {
-        let padded = holdback.len().div_ceil(sector) * sector;
+        let raw = holdback.len();
+        let padded = raw.div_ceil(sector) * sector;
         holdback.resize(padded, 0);
+        if padded > raw {
+            // 패딩까지 해시에 넣고 길이도 패딩 기준으로 맞춘다.
+            //
+            // 이 보정이 없으면 전체가 HOLDBACK 보다 작고 섹터 배수가 아닐 때
+            // `bytes` 가 장치에 실제로 놓인 양보다 작아진다. 그 값이 검증 범위와
+            // 꼬리 지우기 시작점을 함께 결정하기 때문에 두 군데가 동시에 어긋난다:
+            // 검증은 마지막 부분 섹터를 읽지 못해 **멀쩡한 쓰기를 불량 USB 로
+            // 보고**하고, 꼬리 지우기는 시작점이 앞으로 당겨져 **이미지의 그 섹터를
+            // 지운다**. 검증이 기본으로 꺼져 있어서 뒤쪽은 조용히 일어난다.
+            write_hasher.update(&holdback[raw..]);
+            offset = offset.max(padded as u64);
+        }
         session.write_at(0, &holdback)?;
     }
 
@@ -222,4 +253,82 @@ pub fn verify<F: FnMut(ProgressEvent)>(
         return Err(SinkError::VerifyMismatch);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::model::DiskInfo;
+    use crate::core::pipeline::NeverCancel;
+    use crate::device::fake::{FakeEnumerator, FakeWriter};
+    use crate::device::{RawWriter, UsbEnumerator};
+    use std::io::Cursor;
+
+    fn disk() -> DiskInfo {
+        FakeEnumerator::sample()
+            .list_disks()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.number == 2)
+            .expect("표본에 USB 가 있어야 한다")
+    }
+
+    #[test]
+    fn an_empty_source_is_a_failure_not_a_silent_success() {
+        // 여기서 Ok 를 돌려주면 사용자는 **비워진 USB 를 손에 쥔 채** "성공했고
+        // 검증까지 됐다" 를 보게 된다. 이 지점에는 이미 준비 단계가 대상의
+        // 파티션 테이블을 지운 뒤이고, verify 는 bytes == 0 이라 빈 해시끼리
+        // 비교해 통과하기 때문이다.
+        let w = FakeWriter::new(16 * 1024 * 1024, 512);
+        let mut s = w.open(&disk()).unwrap();
+        let mut rep = ProgressReporter::new(|_| {});
+        let out = stream(
+            &mut Cursor::new(Vec::new()),
+            s.as_mut(),
+            Some(0),
+            &NeverCancel,
+            &mut rep,
+        );
+        assert!(matches!(out, Err(SinkError::EmptySource)));
+        assert!(w.write_offsets().is_empty());
+    }
+
+    #[test]
+    fn a_stream_shorter_than_the_holdback_reports_what_the_device_actually_holds() {
+        // 700 바이트를 512 섹터 장치에 쓰면 장치에는 1024 바이트가 놓인다.
+        // 700 을 보고하면 검증 범위와 꼬리 지우기 시작점이 함께 어긋난다.
+        let w = FakeWriter::new(16 * 1024 * 1024, 512);
+        let mut s = w.open(&disk()).unwrap();
+        let mut rep = ProgressReporter::new(|_| {});
+        let out = stream(
+            &mut Cursor::new(vec![0x5Au8; 700]),
+            s.as_mut(),
+            Some(700),
+            &NeverCancel,
+            &mut rep,
+        )
+        .unwrap();
+        assert_eq!(out.bytes, 1024);
+    }
+
+    #[test]
+    fn a_short_write_is_not_reported_as_a_lying_device() {
+        // 길이만 패딩에 맞추고 해시에서 패딩을 빼면 되읽기 대조가 실패해서,
+        // 멀쩡한 쓰기가 "이 USB 는 쓰기를 거짓 보고한다" 로 뜬다.
+        let w = FakeWriter::new(16 * 1024 * 1024, 512);
+        let mut s = w.open(&disk()).unwrap();
+        let mut rep = ProgressReporter::new(|_| {});
+        let out = stream(
+            &mut Cursor::new(vec![0x5Au8; 700]),
+            s.as_mut(),
+            Some(700),
+            &NeverCancel,
+            &mut rep,
+        )
+        .unwrap();
+
+        let mut rep2 = ProgressReporter::new(|_| {});
+        verify(s.as_mut(), out.bytes, &out.hash, &NeverCancel, &mut rep2)
+            .expect("멀쩡한 쓰기가 불량으로 보고됐다");
+    }
 }

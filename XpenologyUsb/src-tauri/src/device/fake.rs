@@ -230,6 +230,15 @@ pub struct FakeWriter {
     observed_override: Option<DiskInfo>,
     /// 쓰기가 일어난 오프셋 순서. 순서를 검증하는 테스트가 쓴다.
     offsets: Arc<Mutex<Vec<u64>>>,
+    /// `open` 이 불렸는가 — 즉 **대상이 파괴되기 시작했는가**.
+    ///
+    /// 이 플래그가 없으면 "대상을 건드리지 않았다" 를 검사할 방법이 없다.
+    /// 실제 [`crate::device::windows::WindowsRawWriter::open`] 은 그 안에서
+    /// 마운트 지점 제거·파티션 테이블 삭제·앞 1MiB 0으로 덮기를 전부 해치우는데,
+    /// 그중 어느 것도 `write_at` 이 아니다. 그래서 `write_offsets()` 가 비어
+    /// 있다는 것은 `sink::stream` 이 돌지 않았다는 뜻일 뿐, 디스크가 무사하다는
+    /// 뜻이 아니다. 열린 순간이 곧 되돌릴 수 없는 지점이므로 그것을 기록한다.
+    opened: Arc<Mutex<bool>>,
     /// 이 오프셋 이후의 쓰기를 조용히 버린다.
     ///
     /// 불량 USB 를 흉내내기 위한 것이다. 싸구려 USB 는 쓰기가 성공했다고
@@ -247,6 +256,7 @@ impl FakeWriter {
             observed_override: None,
             corrupt_after: None,
             offsets: Arc::new(Mutex::new(Vec::new())),
+            opened: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -276,10 +286,20 @@ impl FakeWriter {
     pub fn was_finished(&self) -> bool {
         *self.finished.lock().unwrap()
     }
+
+    /// 대상이 열렸는가 — **되돌릴 수 없는 지점을 넘었는가.**
+    ///
+    /// "인가보다 파괴가 먼저 오는" 회귀를 잡는 유일한 수단이다.
+    /// `write_offsets()` 만으로는 잡히지 않는 이유는 필드 주석에 적어 두었다.
+    pub fn was_opened(&self) -> bool {
+        *self.opened.lock().unwrap()
+    }
 }
 
 impl RawWriter for FakeWriter {
     fn open(&self, disk: &DiskInfo) -> Result<Box<dyn WriteSession>, DeviceError> {
+        // 실제 구현은 이 안에서 이미 디스크를 망가뜨린다. 그 사실을 기록한다.
+        *self.opened.lock().unwrap() = true;
         Ok(Box::new(FakeSession {
             observed: self
                 .observed_override

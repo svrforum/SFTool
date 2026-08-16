@@ -48,6 +48,11 @@ impl From<SinkError> for RunError {
     fn from(e: SinkError) -> Self {
         match e {
             SinkError::Source(s) => RunError::Extract(s),
+            // 압축을 푼 결과가 비었다는 뜻이다. 내려받기가 빈 본문을 받았거나
+            // zip 안의 이미지 항목 크기가 0 인 경우다.
+            SinkError::EmptySource => {
+                RunError::Extract("압축을 푼 이미지가 비어 있습니다 (0 바이트)".into())
+            }
             SinkError::Device(d) => RunError::Device(d),
             SinkError::TooSmall { need, have } => {
                 RunError::Rejected(Rejection::TooSmall { need, have })
