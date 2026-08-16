@@ -143,6 +143,19 @@ impl<F: FnMut(ProgressEvent)> ProgressReporter<F> {
     }
 }
 
+/// 취소 신호. 쓰기 도중에도 확인한다.
+pub trait Cancel {
+    fn is_canceled(&self) -> bool;
+}
+
+/// 취소를 지원하지 않는 기본 구현.
+pub struct NeverCancel;
+impl Cancel for NeverCancel {
+    fn is_canceled(&self) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
