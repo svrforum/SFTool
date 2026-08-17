@@ -35,7 +35,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -54,9 +54,9 @@ jobs:
             librsvg2-dev patchelf libxdo-dev
         working-directory: .
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: XpenologyUsb/package-lock.json
 
@@ -91,7 +91,7 @@ jobs:
     name: Write to a virtual disk
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -99,9 +99,9 @@ jobs:
         with:
           workspaces: XpenologyUsb/src-tauri
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: XpenologyUsb/package-lock.json
 
