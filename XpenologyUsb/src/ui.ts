@@ -168,6 +168,12 @@ export function normalizeFailure(err: unknown): Failure {
   // 없습니다 / 탐색기를 닫고 다시 시도" 가 이기는데, 그 안내는 USB 가
   // 멀쩡하다는 전제에서만 맞다. 이미 비워진 USB 를 두고 할 말이 아니다.
   const map: Record<string, string> = {
+    // **`TargetErased` 보다 위에 있어야 한다.** 검증 실패도 되돌릴 수 없는
+    // 지점 이후라 `TargetErased` 로 감싸여 오는데, 아래에 두면 "USB를
+    // 준비하다 중단됐습니다" 가 이긴다. 그건 틀린 말이다 — 이미지는 끝까지
+    // 쓰였고 멈춘 곳은 준비 단계가 아니라 대조다. 사용자가 할 일도 정반대다:
+    // 되꽂아 이어서 하는 게 아니라 그 USB 를 믿지 않는 것이다.
+    VerifyMismatch: 'verify_mismatch',
     TargetErased: 'target_erased',
     NeedsElevation: 'needs_elevation',
     Locked: 'locked',
@@ -190,6 +196,16 @@ export function normalizeFailure(err: unknown): Failure {
 export function cleanDetail(s: string): string {
   // Device(Io { code: 5, message: "..." }) 형태에서 message 만 꺼낸다.
   const m = s.match(/message:\s*"((?:[^"\\]|\\.)*)"/);
-  const body = m ? m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"') : s;
-  return body.slice(0, 600);
+  if (m) return m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').slice(0, 600);
+
+  // 사람에게 할 말이 없는 순수 디버그 표현은 아예 내보내지 않는다.
+  //
+  // `TargetErased { cause: VerifyMismatch }` 가 그대로 화면에 찍혀 나갔다.
+  // 백엔드가 오류를 `format!("{e:?}")` 로 넘기기 때문에, 안에 문장이 없는
+  // 변형은 타입 이름만 남는다. 그건 사용자에게 아무 정보가 아니면서 번역도
+  // 되지 않고, 프로그램이 자기 내부를 흘리고 있다는 인상만 준다. 위의 친절한
+  // 문구가 이미 같은 내용을 말하고 있으므로 여기서는 비워 둔다.
+  if (/^[A-Za-z0-9_]+(\s*\{[^"]*\})?$/.test(s.trim())) return '';
+
+  return s.slice(0, 600);
 }
