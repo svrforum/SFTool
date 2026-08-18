@@ -102,6 +102,11 @@ const ko: Dict = {
   verify_at_head:
     '어긋난 곳은 맨 앞 1MiB — 파티션 테이블이 있는 구간입니다. 이 위치는 USB 불량보다 윈도우가 그 구간을 건드렸을 때 나옵니다. 제보해 주시면 도움이 됩니다.',
   verify_at_offset: '처음 어긋난 위치: {0} 지점 (오프셋 {1})',
+  verify_reread_ok:
+    '같은 자리를 다시 읽으니 맞았습니다 — USB 내용은 멀쩡하고 읽어오는 쪽이 틀렸습니다. 이 USB 는 아마 정상입니다.',
+  verify_reread_same: '다시 읽어도 같은 값입니다 — USB 에 실제로 다른 내용이 들어 있습니다.',
+  verify_reread_unstable:
+    '두 번 읽은 값이 서로도 다릅니다 — 읽기 자체가 불안정합니다. 다른 포트에 꽂아보세요.',
   err_network: '내려받지 못했습니다',
   err_network_why: '네트워크 연결을 확인하고 다시 시도해 주세요.',
   err_layout_gpt: 'GPT 로 만들어진 USB 는 아직 복제할 수 없습니다.',
@@ -235,6 +240,11 @@ const en: Dict = {
   verify_at_head:
     'The mismatch is in the first 1 MiB, where the partition table lives. That location points at something else touching the drive rather than at a faulty stick. Please report it.',
   verify_at_offset: 'First mismatch at {0} (offset {1})',
+  verify_reread_ok:
+    'Reading the same place again matched -- the drive holds the right bytes and the read was at fault. This drive is probably fine.',
+  verify_reread_same: 'Reading it again gave the same wrong bytes -- the drive really does hold something else.',
+  verify_reread_unstable:
+    'Two reads of the same place disagreed with each other -- reading itself is unreliable. Try another port.',
   err_network: 'Download failed',
   err_network_why: 'Check your network connection and try again.',
   err_layout_gpt: 'This drive uses GPT, which cannot be cloned yet.',

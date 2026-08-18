@@ -47,6 +47,21 @@ pub const TAIL_ZERO: u64 = 1024 * 1024;
 /// 블록 번호만으로 갈린다. 8GB 이미지라도 해시 목록은 256KB 다.
 pub const BLOCK: u64 = HOLDBACK;
 
+/// 어긋난 블록을 한 번 더 읽어본 결과.
+///
+/// 이 한 번이 "매체에 정말 다른 바이트가 있다" 와 "읽어오는 길이 거짓말을
+/// 했다" 를 가른다. 둘은 고치는 곳이 완전히 다른데, 지금까지는 구분할 방법이
+/// 없어서 어느 쪽인지 추측해야 했다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reread {
+    /// 다시 읽으니 맞았다 — 매체는 멀쩡하고 처음 읽기가 틀렸다.
+    Matched,
+    /// 다시 읽어도 같은 값으로 어긋난다 — 매체에 정말 다른 내용이 있다.
+    SameAgain,
+    /// 두 번의 읽기가 서로도 다르다 — 읽는 것 자체가 불안정하다.
+    Unstable,
+}
+
 /// 전체 해시와 블록별 해시를 함께 쌓는다.
 ///
 /// 먹이는 순서가 곧 장치에 놓이는 순서여야 한다. `stream` 이 홀드백을 먼저
@@ -124,6 +139,7 @@ pub enum SinkError {
     /// 되읽은 내용이 다르다. `at` 은 처음 어긋난 [`BLOCK`] 의 시작 오프셋.
     VerifyMismatch {
         at: u64,
+        reread: Reread,
     },
     Canceled,
 }
@@ -312,11 +328,26 @@ pub fn verify<F: FnMut(ProgressEvent)>(
         // 블록마다 그 자리에서 대조한다. 전체 해시 하나만 보면 어긋났다는
         // 사실만 남고 위치가 사라진다 — 그러면 원인을 추측으로 골라야 한다.
         let got: [u8; 32] = Sha256::digest(&back[..n]).into();
-        match blocks.get(index) {
-            Some(want) if *want == got => {}
-            Some(_) => return Err(SinkError::VerifyMismatch { at }),
-            // 기록된 블록 수보다 많이 읽고 있다면 길이 계산이 어긋난 것이다.
-            None => return Err(SinkError::VerifyMismatch { at }),
+        let want = blocks.get(index).copied();
+        if want != Some(got) {
+            // 같은 자리를 한 번 더 읽는다. 비용은 1MiB 한 번이고, 얻는 것은
+            // 원인을 가르는 한 비트다.
+            let mut again = vec![0u8; n];
+            let reread = match session.read_at(at, &mut again) {
+                Ok(()) => {
+                    let twice: [u8; 32] = Sha256::digest(&again[..]).into();
+                    if want == Some(twice) {
+                        Reread::Matched
+                    } else if twice == got {
+                        Reread::SameAgain
+                    } else {
+                        Reread::Unstable
+                    }
+                }
+                // 다시 읽지도 못하면 매체 쪽 문제로 본다.
+                Err(_) => Reread::SameAgain,
+            };
+            return Err(SinkError::VerifyMismatch { at, reread });
         }
         index += 1;
 
@@ -335,7 +366,10 @@ pub fn verify<F: FnMut(ProgressEvent)>(
     // 블록이 전부 맞았는데 전체가 다르면 블록 경계 밖에서 어긋난 것이다.
     // 여기까지 오면 안 되지만, 조용히 통과시키느니 남은 범위를 짚어 준다.
     if whole.finalize().as_slice() != expected.as_slice() {
-        return Err(SinkError::VerifyMismatch { at: pos });
+        return Err(SinkError::VerifyMismatch {
+            at: pos,
+            reread: Reread::SameAgain,
+        });
     }
     Ok(())
 }
@@ -460,7 +494,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, SinkError::VerifyMismatch { at } if at == 3 * BLOCK),
+            matches!(err, SinkError::VerifyMismatch { at, .. } if at == 3 * BLOCK),
             "어긋난 블록을 짚지 못했다: {err:?}"
         );
     }
@@ -501,7 +535,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, SinkError::VerifyMismatch { at: 0 }),
+            matches!(err, SinkError::VerifyMismatch { at: 0, .. }),
             "파티션 테이블 훼손이 0 번 블록으로 보고되지 않았다: {err:?}"
         );
     }

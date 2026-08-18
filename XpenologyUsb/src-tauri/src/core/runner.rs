@@ -52,7 +52,7 @@ pub enum RunError {
     /// 불량이 아니라 윈도우가 그 구간을 건드렸다는 뜻이 된다. `at` 이 그보다
     /// 뒤면 본문이 어긋난 것이라 장치 쪽을 의심하는 게 맞다. 둘을 구분하지
     /// 못하는 동안 원인을 추측으로 골라야 했다.
-    VerifyMismatch { at: u64 },
+    VerifyMismatch { at: u64, reread: sink::Reread },
     /// **대상이 이미 지워진 뒤에** 실패했다.
     ///
     /// [`crate::device::RawWriter::open`] 은 그 안에서 마운트 지점을 떼고
@@ -93,7 +93,7 @@ impl From<SinkError> for RunError {
             SinkError::TooSmall { need, have } => {
                 RunError::Rejected(Rejection::TooSmall { need, have })
             }
-            SinkError::VerifyMismatch { at } => RunError::VerifyMismatch { at },
+            SinkError::VerifyMismatch { at, reread } => RunError::VerifyMismatch { at, reread },
             SinkError::Canceled => RunError::Canceled,
         }
     }

@@ -201,12 +201,20 @@ export function cleanDetail(s: string): string {
   // 검증이 어긋난 위치는 사람에게 할 말이 된다. 0 이면 맨 앞 1MiB — 즉
   // 파티션 테이블 구간이고, 그건 USB 불량이 아니라 다른 무언가가 그 구간을
   // 건드렸다는 뜻이다. 그 구분이 제보에서 가장 중요한 한 줄이라 살려 둔다.
-  const at = s.match(/VerifyMismatch\s*\{\s*at:\s*(\d+)\s*\}/);
+  const at = s.match(/VerifyMismatch\s*\{\s*at:\s*(\d+)\s*,\s*reread:\s*(\w+)/);
   if (at) {
     const off = Number(at[1]);
-    return off === 0
-      ? t('verify_at_head')
-      : t('verify_at_offset', fmtBytes(off), String(off));
+    const where =
+      off === 0
+        ? t('verify_at_head')
+        : t('verify_at_offset', fmtBytes(off), String(off));
+    // 같은 자리를 한 번 더 읽어본 결과. 이 한 줄이 "매체가 정말 다르다" 와
+    // "읽어오는 길이 거짓말했다" 를 가른다.
+    const again =
+      { Matched: 'verify_reread_ok', SameAgain: 'verify_reread_same', Unstable: 'verify_reread_unstable' }[
+        at[2]
+      ] ?? '';
+    return again ? `${where}\n${t(again)}` : where;
   }
 
   // 사람에게 할 말이 없는 순수 디버그 표현은 아예 내보내지 않는다.

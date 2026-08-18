@@ -57,6 +57,7 @@ pub enum CloneError {
     /// `at` 은 처음 어긋난 [`sink::BLOCK`] 의 시작 오프셋.
     VerifyMismatch {
         at: u64,
+        reread: sink::Reread,
     },
     /// **대상이 이미 지워진 뒤에** 실패했다.
     ///
@@ -95,7 +96,7 @@ impl From<SinkError> for CloneError {
             SinkError::TooSmall { need, have } => {
                 CloneError::Rejected(Rejection::TooSmall { need, have })
             }
-            SinkError::VerifyMismatch { at } => CloneError::VerifyMismatch { at },
+            SinkError::VerifyMismatch { at, reread } => CloneError::VerifyMismatch { at, reread },
             SinkError::Canceled => CloneError::Canceled,
         }
     }
