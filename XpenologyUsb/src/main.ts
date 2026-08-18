@@ -116,7 +116,11 @@ const state: State = {
   target: null,
   plan: null,
   loader: 'MShell',
-  verify: false,
+  // 기본으로 켠다. 쓰기가 끝났다는 말은 장치가 오류를 안 냈다는 뜻일 뿐이고,
+  // 불량 USB 는 조용히 다른 바이트를 돌려준다. 그건 부팅이 안 되는 시점에야
+  // 드러나고, 그때는 원인이 USB 인지 로더인지 알 수 없다. 시간이 두 배로
+  // 드는 대신 그 구분을 여기서 끝낸다.
+  verify: true,
   simulated: false,
   loading: true,
   progress: null,
@@ -393,6 +397,10 @@ function burnScreen(): Screen {
           }</div>
         </div>
         <div class="note"><span>ℹ</span><span>${esc(t('step3_note'))}</span></div>
+        <label class="check">
+          <input type="checkbox" data-verify="1" ${state.verify ? 'checked' : ''}>
+          <span>${esc(t('verify_label'))}</span>
+        </label>
       </main>`,
       foot: `<button class="ghost" data-go="2">${esc(t('back'))}</button>
              <button class="cta danger" data-go="4">${esc(
@@ -680,9 +688,9 @@ app.addEventListener('change', (e) => {
 function startMode(mode: Mode) {
   state.mode = mode;
   state.step = 1;
-  // 검증 체크박스는 복제 확인 화면에만 있다. 켠 채로 굽기로 넘어가면 사용자가
-  // 보지도 끄지도 못하는 검증이 붙어 시간만 두 배가 된다.
-  state.verify = false;
+  // 갈래를 옮길 때마다 기본값으로 되돌린다. 두 확인 화면 모두 체크박스를
+  // 보여주므로, 앞선 갈래에서 끈 것이 다음 갈래까지 따라가지 않게 한다.
+  state.verify = true;
   state.selectedDisk = null;
   state.source = null;
   state.target = null;

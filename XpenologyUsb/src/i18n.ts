@@ -32,7 +32,7 @@ const ko: Dict = {
   clone_analyzing: '원본을 살펴보는 중…',
   clone_done: '복제가\n끝났습니다',
   clone_done_sub: '{0} 를 {1} 로 복사했습니다',
-  verify_label: '쓴 뒤에 다시 읽어 확인합니다 (시간이 더 걸립니다)',
+  verify_label: '쓴 내용을 되읽어 대조합니다. 끄면 절반쯤 빨라지지만, USB가 제대로 받았는지는 부팅해 봐야 압니다',
 
   step1_title: 'USB를\n선택해 주세요',
   step1_lead: 'USB 저장장치만 표시됩니다. 내장 디스크는 목록에 나오지 않습니다.',
@@ -159,7 +159,8 @@ const en: Dict = {
   clone_analyzing: 'Reading the source…',
   clone_done: 'Clone\nfinished',
   clone_done_sub: 'Copied {0} onto {1}',
-  verify_label: 'Read the drive back afterwards to check it (takes longer)',
+  verify_label:
+    'Read the drive back and compare it. Turning this off is about twice as fast, but you will not know the USB took the image until you boot from it',
 
   step1_title: 'Choose\nyour USB drive',
   step1_lead:
