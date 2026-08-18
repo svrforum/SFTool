@@ -1,0 +1,36 @@
+# 저장소 전체에 걸리는 규칙. 도구별 규칙은 각 폴더의 .gitignore 에 있다.
+
+# 빌드 산출물
+node_modules/
+dist/
+dist-ssr/
+target/
+**/gen/schemas/
+
+# 편집기·OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# 로그와 로컬 설정
+*.log
+*.local
+.env
+.env.*
+!.env.example
+
+# 코딩 에이전트가 만드는 작업 파일.
+#
+# 실행 계획이나 세션 기록은 만들 때만 쓰이고 읽는 사람이 없다. 한번 올라가면
+# 저장소에 남아 개발 환경 경로까지 같이 공개된다. 설계 문서처럼 남길 가치가
+# 있는 것은 손으로 정리해 XpenologyUsb/docs/ 에 넣는다.
+.claude/
+.serena/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+docs/superpowers/
