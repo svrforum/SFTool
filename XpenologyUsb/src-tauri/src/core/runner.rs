@@ -358,6 +358,11 @@ fn write_to_target<F: FnMut(super::pipeline::ProgressEvent)>(
     sink::zero_tail(session.as_mut(), out.bytes)?;
 
     if cfg.verify {
+        // 되읽기 전에 캐시를 매체로 내려보낸다. 이 한 줄이 없으면 검증은
+        // 방금 쓴 캐시를 되읽어 자기 자신과 비교하거나, 홀드백 때문에 막
+        // 붙기 시작한 볼륨이 캐시를 버리면 쓰기 이전 내용을 읽는다.
+        // 후자가 실물에서 났다 — 멀쩡히 써진 USB 가 불량으로 보고됐다.
+        session.commit()?;
         rep.begin(Stage::Verifying, None);
         sink::verify(session.as_mut(), out.bytes, &out.hash, cancel, rep)?;
     }
@@ -770,6 +775,33 @@ mod tests {
             |_| {},
         )
         .expect("정상 장치에서는 검증이 통과해야 한다");
+    }
+
+    #[test]
+    fn verify_reads_the_medium_and_not_a_cache_that_has_not_landed_yet() {
+        // 0.4.0 을 실물에서 돌렸을 때 멀쩡히 써진 USB 가 VerifyMismatch 로
+        // 실패했다. 원인은 장치가 아니라 순서였다 — 검증이 플러시보다 먼저
+        // 돌았다. 핸들은 캐시를 우회하지 않으므로 그 시점의 되읽기는 매체가
+        // 아니라 캐시를 확인하는 것이고, 홀드백이 방금 오프셋 0 에 놓이면서
+        // 윈도우가 새 볼륨을 붙이기 시작한 참이라 캐시가 버려질 수 있다.
+        //
+        // 가짜가 이 현실을 흉내내지 않았기 때문에 테스트는 전부 초록불이었다.
+        let io = FakeIo::new((0..8192u32).map(|i| (i % 253) as u8).collect());
+        let writer = FakeWriter::new(1024 * 1024, 512).buffering();
+        run(
+            RunConfig {
+                loader: Loader::MShell,
+                verify: true,
+            },
+            &usb(),
+            &HashSet::new(),
+            &io,
+            &writer,
+            &NeverCancel,
+            |_| {},
+        )
+        .expect("검증 전에 매체로 내려보내지 않아 멀쩡한 쓰기를 불량으로 보고했다");
+        assert!(writer.was_committed(), "검증 전에 commit 이 불리지 않았다");
     }
 
     #[test]

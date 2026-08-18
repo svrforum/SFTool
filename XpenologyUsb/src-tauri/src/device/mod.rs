@@ -130,6 +130,17 @@ pub trait WriteSession: Send {
     /// 되읽기 (검증용).
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DeviceError>;
 
+    /// 여기까지 쓴 것을 매체에 밀어넣는다. 세션은 계속 살아 있다.
+    ///
+    /// **검증 전에 반드시 불러야 한다.** 핸들은 캐시를 우회하지 않으므로
+    /// (`FILE_FLAG_NO_BUFFERING` 미사용), 이걸 부르기 전의 되읽기는 매체가
+    /// 아니라 캐시를 확인하는 것이 된다. 게다가 직전에 홀드백이 오프셋 0 에
+    /// 놓이면서 윈도우가 새 파티션을 인식해 볼륨을 붙이기 시작하는데, 그
+    /// 볼륨들은 `open()` 시점에 없었으니 잠겨 있지도 않다. 그 와중에 캐시가
+    /// 버려지면 되읽기가 쓰기 이전 내용을 돌려주고, 멀쩡히 써진 USB 가
+    /// 불량으로 보고된다.
+    fn commit(&mut self) -> Result<(), DeviceError>;
+
     /// 마무리 — 플러시, 파티션 테이블 재인식, 잠금 해제, 꺼내기.
     fn finish(self: Box<Self>) -> Result<(), DeviceError>;
 }

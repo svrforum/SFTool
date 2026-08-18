@@ -401,6 +401,10 @@ impl WriteSession for WindowsSession {
         Ok(())
     }
 
+    fn commit(&mut self) -> Result<(), DeviceError> {
+        ioctl::flush(self.hnd()).map_err(|e| self.explain(e, "캐시를 매체로 밀어내기", None))
+    }
+
     fn finish(self: Box<Self>) -> Result<(), DeviceError> {
         // 플러시를 빼먹으면 사용자가 USB 를 뽑는 순간 이미지 뒷부분이 사라진다.
         // 이것만 오류로 올린다 — 나머지는 정리 작업이라 실패해도 이미지는 온전하다.

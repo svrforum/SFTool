@@ -207,6 +207,9 @@ fn copy_to_target<F: FnMut(ProgressEvent)>(
 
     // --- 검증 (선택) --------------------------------------------------------
     if cfg.verify {
+        // 굽기 경로와 같은 이유로 되읽기 전에 매체로 내려보낸다.
+        // 자세한 사정은 `WriteSession::commit` 의 주석에 있다.
+        dst.commit()?;
         rep.begin(Stage::Verifying, None);
         sink::verify(dst.as_mut(), out.bytes, &out.hash, cancel, rep)?;
     }

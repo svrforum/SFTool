@@ -164,6 +164,24 @@ pub struct FakeSession {
     corrupt_after: Option<u64>,
     fail_at: Option<u64>,
     offsets: Arc<Mutex<Vec<u64>>>,
+    /// 실제 핸들처럼 쓰기를 캐시에 붙들고 있다가 `commit` 에서 내보낸다.
+    buffered: bool,
+    /// 아직 매체에 닿지 않은 쓰기.
+    pending: Vec<(u64, Vec<u8>)>,
+    committed: Arc<Mutex<bool>>,
+}
+
+impl FakeSession {
+    /// 붙들고 있던 쓰기를 실제 버퍼에 내려놓는다.
+    fn land(&mut self) -> Result<(), DeviceError> {
+        let mut d = self.data.lock().unwrap();
+        for (offset, buf) in self.pending.drain(..) {
+            let end = offset as usize + buf.len();
+            d[offset as usize..end].copy_from_slice(&buf);
+        }
+        *self.committed.lock().unwrap() = true;
+        Ok(())
+    }
 }
 
 impl WriteSession for FakeSession {
@@ -216,6 +234,14 @@ impl WriteSession for FakeSession {
                 return Ok(());
             }
         }
+        // 캐시를 우회하지 않는 핸들을 흉내낸다. `commit` 전에는 되읽어도
+        // 매체의 옛 내용이 나온다 — 실물에서 검증이 멀쩡한 USB 를 불량으로
+        // 보고했던 것이 정확히 이 상태였다.
+        if self.buffered {
+            drop(d);
+            self.pending.push((offset, buf.to_vec()));
+            return Ok(());
+        }
         d[offset as usize..end].copy_from_slice(buf);
         Ok(())
     }
@@ -241,7 +267,12 @@ impl WriteSession for FakeSession {
         Ok(())
     }
 
-    fn finish(self: Box<Self>) -> Result<(), DeviceError> {
+    fn commit(&mut self) -> Result<(), DeviceError> {
+        self.land()
+    }
+
+    fn finish(mut self: Box<Self>) -> Result<(), DeviceError> {
+        self.land()?;
         *self.finished.lock().unwrap() = true;
         Ok(())
     }
@@ -274,6 +305,9 @@ pub struct FakeWriter {
     corrupt_after: Option<u64>,
     /// 이 오프셋을 넘는 쓰기가 실패한다. 쓰는 도중 뽑힌 USB 를 흉내낸다.
     fail_at: Option<u64>,
+    /// 쓰기를 캐시에 붙들고 `commit` 에서야 매체에 내려놓는 장치로 만든다.
+    buffered: bool,
+    committed: Arc<Mutex<bool>>,
 }
 
 impl FakeWriter {
@@ -287,7 +321,24 @@ impl FakeWriter {
             fail_at: None,
             offsets: Arc::new(Mutex::new(Vec::new())),
             opened: Arc::new(Mutex::new(false)),
+            buffered: false,
+            committed: Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// 실제 윈도우 핸들처럼 **쓰기를 캐시에 붙들고 있는** 장치로 만든다.
+    ///
+    /// `commit` 을 부르기 전의 되읽기는 매체의 옛 내용을 돌려준다. 가짜가
+    /// 이걸 흉내내지 않던 동안, 플러시 없이 검증하는 코드가 테스트를 전부
+    /// 통과하고 실물에서만 깨졌다.
+    pub fn buffering(mut self) -> Self {
+        self.buffered = true;
+        self
+    }
+
+    /// `commit` 이 호출됐는가.
+    pub fn was_committed(&self) -> bool {
+        *self.committed.lock().unwrap()
     }
 
     /// 열었을 때 다른 장치가 관측되는 상황을 만든다 (디스크 번호 재사용 재현).
@@ -352,6 +403,9 @@ impl RawWriter for FakeWriter {
             corrupt_after: self.corrupt_after,
             fail_at: self.fail_at,
             offsets: Arc::clone(&self.offsets),
+            buffered: self.buffered,
+            pending: Vec::new(),
+            committed: Arc::clone(&self.committed),
         }))
     }
 }
