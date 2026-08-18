@@ -198,6 +198,17 @@ export function cleanDetail(s: string): string {
   const m = s.match(/message:\s*"((?:[^"\\]|\\.)*)"/);
   if (m) return m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').slice(0, 600);
 
+  // 검증이 어긋난 위치는 사람에게 할 말이 된다. 0 이면 맨 앞 1MiB — 즉
+  // 파티션 테이블 구간이고, 그건 USB 불량이 아니라 다른 무언가가 그 구간을
+  // 건드렸다는 뜻이다. 그 구분이 제보에서 가장 중요한 한 줄이라 살려 둔다.
+  const at = s.match(/VerifyMismatch\s*\{\s*at:\s*(\d+)\s*\}/);
+  if (at) {
+    const off = Number(at[1]);
+    return off === 0
+      ? t('verify_at_head')
+      : t('verify_at_offset', fmtBytes(off), String(off));
+  }
+
   // 사람에게 할 말이 없는 순수 디버그 표현은 아예 내보내지 않는다.
   //
   // `TargetErased { cause: VerifyMismatch }` 가 그대로 화면에 찍혀 나갔다.

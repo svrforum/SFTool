@@ -54,7 +54,10 @@ pub enum CloneError {
     Device(DeviceError),
     /// 원본을 읽지 못했다.
     Source(String),
-    VerifyMismatch,
+    /// `at` 은 처음 어긋난 [`sink::BLOCK`] 의 시작 오프셋.
+    VerifyMismatch {
+        at: u64,
+    },
     /// **대상이 이미 지워진 뒤에** 실패했다.
     ///
     /// `RawWriter::open` 이 그 안에서 대상의 파티션 테이블을 지운다. 그 뒤의
@@ -92,7 +95,7 @@ impl From<SinkError> for CloneError {
             SinkError::TooSmall { need, have } => {
                 CloneError::Rejected(Rejection::TooSmall { need, have })
             }
-            SinkError::VerifyMismatch => CloneError::VerifyMismatch,
+            SinkError::VerifyMismatch { at } => CloneError::VerifyMismatch { at },
             SinkError::Canceled => CloneError::Canceled,
         }
     }
@@ -211,7 +214,7 @@ fn copy_to_target<F: FnMut(ProgressEvent)>(
         // 자세한 사정은 `WriteSession::commit` 의 주석에 있다.
         dst.commit()?;
         rep.begin(Stage::Verifying, None);
-        sink::verify(dst.as_mut(), out.bytes, &out.hash, cancel, rep)?;
+        sink::verify(dst.as_mut(), out.bytes, &out.hash, &out.blocks, cancel, rep)?;
     }
 
     // --- 마무리 -------------------------------------------------------------
@@ -447,7 +450,7 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            matches!(cause(&e), CloneError::VerifyMismatch),
+            matches!(cause(&e), CloneError::VerifyMismatch { .. }),
             "실제: {e:?}"
         );
     }

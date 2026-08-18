@@ -36,12 +36,75 @@ pub const HOLDBACK: u64 = 1024 * 1024;
 /// 지워진 파티션 테이블을 되살린다.
 pub const TAIL_ZERO: u64 = 1024 * 1024;
 
+/// 검증 대조 단위.
+///
+/// 전체를 해시 하나로 비교하면 어긋났다는 사실만 알고 **어디가** 어긋났는지는
+/// 알 수 없다. 그 상태로 실물 장애를 두 번 만났고, 두 번 다 추측으로 원인을
+/// 골라야 했다. 블록 단위로 쪼개 두면 실패가 위치를 함께 말한다.
+///
+/// `HOLDBACK` 과 같은 크기인 것은 우연이 아니다. 그래야 0번 블록이 나중에 쓰는
+/// 파티션 테이블 구간과 정확히 겹쳐서, "맨 앞만 틀렸다" 와 "본문이 틀렸다" 가
+/// 블록 번호만으로 갈린다. 8GB 이미지라도 해시 목록은 256KB 다.
+pub const BLOCK: u64 = HOLDBACK;
+
+/// 전체 해시와 블록별 해시를 함께 쌓는다.
+///
+/// 먹이는 순서가 곧 장치에 놓이는 순서여야 한다. `stream` 이 홀드백을 먼저
+/// 해시에 넣고 본문을 뒤에 넣는 것은 바로 그 때문이다 — 장치에서도 홀드백이
+/// 0번 오프셋에 온다.
+struct Tally {
+    whole: Sha256,
+    block: Sha256,
+    filled: u64,
+    blocks: Vec<[u8; 32]>,
+}
+
+impl Tally {
+    fn new() -> Self {
+        Self {
+            whole: Sha256::new(),
+            block: Sha256::new(),
+            filled: 0,
+            blocks: Vec::new(),
+        }
+    }
+
+    fn update(&mut self, mut data: &[u8]) {
+        self.whole.update(data);
+        while !data.is_empty() {
+            let room = (BLOCK - self.filled) as usize;
+            let take = room.min(data.len());
+            self.block.update(&data[..take]);
+            self.filled += take as u64;
+            if self.filled == BLOCK {
+                self.blocks.push(
+                    std::mem::replace(&mut self.block, Sha256::new())
+                        .finalize()
+                        .into(),
+                );
+                self.filled = 0;
+            }
+            data = &data[take..];
+        }
+    }
+
+    /// 마지막 자투리 블록까지 닫는다.
+    fn finish(mut self) -> ([u8; 32], Vec<[u8; 32]>) {
+        if self.filled > 0 {
+            self.blocks.push(self.block.finalize().into());
+        }
+        (self.whole.finalize().into(), self.blocks)
+    }
+}
+
 /// 쓰기 결과.
 pub struct SinkOutcome {
     /// 실제로 쓴 바이트 수 (섹터 배수로 올림된 값).
     pub bytes: u64,
     /// 쓴 내용의 SHA-256. 검증할 때 되읽은 것과 대조한다.
     pub hash: [u8; 32],
+    /// [`BLOCK`] 단위 해시. 어긋난 위치를 짚기 위한 것이다.
+    pub blocks: Vec<[u8; 32]>,
 }
 
 /// 쓰기 실패 원인.
@@ -58,7 +121,10 @@ pub enum SinkError {
         need: u64,
         have: u64,
     },
-    VerifyMismatch,
+    /// 되읽은 내용이 다르다. `at` 은 처음 어긋난 [`BLOCK`] 의 시작 오프셋.
+    VerifyMismatch {
+        at: u64,
+    },
     Canceled,
 }
 
@@ -84,7 +150,7 @@ pub fn stream<F: FnMut(ProgressEvent)>(
     let mut buf = vec![0u8; CHUNK];
     let mut offset: u64 = 0;
     let mut last_t = std::time::Instant::now();
-    let mut write_hasher = Sha256::new();
+    let mut tally = Tally::new();
 
     // 이미지 맨 앞을 담아 둘 곳. 마지막에 쓴다.
     let mut holdback: Vec<u8> = Vec::new();
@@ -112,7 +178,7 @@ pub fn stream<F: FnMut(ProgressEvent)>(
             let want = (HOLDBACK - holdback.len() as u64) as usize;
             let take = want.min(filled);
             holdback.extend_from_slice(&buf[..take]);
-            write_hasher.update(&buf[..take]);
+            tally.update(&buf[..take]);
             offset += take as u64;
             if take == filled {
                 continue;
@@ -137,7 +203,7 @@ pub fn stream<F: FnMut(ProgressEvent)>(
         }
 
         session.write_at(offset, &buf[..padded])?;
-        write_hasher.update(&buf[..padded]);
+        tally.update(&buf[..padded]);
         offset += padded as u64;
 
         let now = std::time::Instant::now();
@@ -183,15 +249,17 @@ pub fn stream<F: FnMut(ProgressEvent)>(
             // 검증은 마지막 부분 섹터를 읽지 못해 **멀쩡한 쓰기를 불량 USB 로
             // 보고**하고, 꼬리 지우기는 시작점이 앞으로 당겨져 **이미지의 그 섹터를
             // 지운다**. 검증이 기본으로 꺼져 있어서 뒤쪽은 조용히 일어난다.
-            write_hasher.update(&holdback[raw..]);
+            tally.update(&holdback[raw..]);
             offset = offset.max(padded as u64);
         }
         session.write_at(0, &holdback)?;
     }
 
+    let (hash, blocks) = tally.finish();
     Ok(SinkOutcome {
         bytes: offset,
-        hash: write_hasher.finalize().into(),
+        hash,
+        blocks,
     })
 }
 
@@ -216,27 +284,42 @@ pub fn verify<F: FnMut(ProgressEvent)>(
     session: &mut dyn WriteSession,
     bytes: u64,
     expected: &[u8; 32],
+    blocks: &[[u8; 32]],
     cancel: &dyn Cancel,
     rep: &mut ProgressReporter<F>,
 ) -> Result<(), SinkError> {
     let sector = session.sector_size() as usize;
-    let mut back = vec![0u8; CHUNK];
-    let mut hasher = Sha256::new();
+    let mut back = vec![0u8; BLOCK as usize];
+    let mut whole = Sha256::new();
     let mut pos = 0u64;
+    let mut index = 0usize;
     let mut last_v = std::time::Instant::now();
 
     while pos < bytes {
         if cancel.is_canceled() {
             return Err(SinkError::Canceled);
         }
-        let n = (CHUNK as u64).min(bytes - pos) as usize;
+        let n = BLOCK.min(bytes - pos) as usize;
         // 읽기도 섹터 배수여야 한다.
         let n = (n / sector) * sector;
         if n == 0 {
             break;
         }
-        session.read_at(pos, &mut back[..n])?;
-        hasher.update(&back[..n]);
+        let at = pos;
+        session.read_at(at, &mut back[..n])?;
+        whole.update(&back[..n]);
+
+        // 블록마다 그 자리에서 대조한다. 전체 해시 하나만 보면 어긋났다는
+        // 사실만 남고 위치가 사라진다 — 그러면 원인을 추측으로 골라야 한다.
+        let got: [u8; 32] = Sha256::digest(&back[..n]).into();
+        match blocks.get(index) {
+            Some(want) if *want == got => {}
+            Some(_) => return Err(SinkError::VerifyMismatch { at }),
+            // 기록된 블록 수보다 많이 읽고 있다면 길이 계산이 어긋난 것이다.
+            None => return Err(SinkError::VerifyMismatch { at }),
+        }
+        index += 1;
+
         pos += n as u64;
 
         let now = std::time::Instant::now();
@@ -249,8 +332,10 @@ pub fn verify<F: FnMut(ProgressEvent)>(
         last_v = now;
     }
 
-    if hasher.finalize().as_slice() != expected.as_slice() {
-        return Err(SinkError::VerifyMismatch);
+    // 블록이 전부 맞았는데 전체가 다르면 블록 경계 밖에서 어긋난 것이다.
+    // 여기까지 오면 안 되지만, 조용히 통과시키느니 남은 범위를 짚어 준다.
+    if whole.finalize().as_slice() != expected.as_slice() {
+        return Err(SinkError::VerifyMismatch { at: pos });
     }
     Ok(())
 }
@@ -328,7 +413,96 @@ mod tests {
         .unwrap();
 
         let mut rep2 = ProgressReporter::new(|_| {});
-        verify(s.as_mut(), out.bytes, &out.hash, &NeverCancel, &mut rep2)
-            .expect("멀쩡한 쓰기가 불량으로 보고됐다");
+        verify(
+            s.as_mut(),
+            out.bytes,
+            &out.hash,
+            &out.blocks,
+            &NeverCancel,
+            &mut rep2,
+        )
+        .expect("멀쩡한 쓰기가 불량으로 보고됐다");
+    }
+
+    #[test]
+    fn a_mismatch_says_which_block_went_wrong() {
+        // 위치를 말하지 못하는 검증 때문에 원인을 두 번 추측해야 했다.
+        // 본문 한가운데를 건드리면 그 블록을 짚어야 한다.
+        let w = FakeWriter::new(16 * 1024 * 1024, 512);
+        let mut s = w.open(&disk()).unwrap();
+        let mut rep = ProgressReporter::new(|_| {});
+        let payload: Vec<u8> = (0..(5 * BLOCK as usize)).map(|i| (i % 251) as u8).collect();
+        let out = stream(
+            &mut Cursor::new(payload),
+            s.as_mut(),
+            None,
+            &NeverCancel,
+            &mut rep,
+        )
+        .unwrap();
+
+        // 3번 블록 안의 한 섹터를 뒤집는다.
+        let corrupt_at = 3 * BLOCK + 4096;
+        let mut sector = vec![0u8; 512];
+        s.read_at(corrupt_at, &mut sector).unwrap();
+        sector[0] ^= 0xFF;
+        s.write_at(corrupt_at, &sector).unwrap();
+        s.commit().unwrap();
+
+        let mut rep2 = ProgressReporter::new(|_| {});
+        let err = verify(
+            s.as_mut(),
+            out.bytes,
+            &out.hash,
+            &out.blocks,
+            &NeverCancel,
+            &mut rep2,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SinkError::VerifyMismatch { at } if at == 3 * BLOCK),
+            "어긋난 블록을 짚지 못했다: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_mismatch_in_the_partition_table_points_at_offset_zero() {
+        // 0번 블록은 홀드백이 마지막에 놓는 파티션 테이블 구간이다. 여기가
+        // 어긋났다는 것은 장치 불량이 아니라 누군가 그 구간을 건드렸다는 뜻이고,
+        // 그 구분이 지금 우리에게 필요한 정보다.
+        let w = FakeWriter::new(16 * 1024 * 1024, 512);
+        let mut s = w.open(&disk()).unwrap();
+        let mut rep = ProgressReporter::new(|_| {});
+        let payload: Vec<u8> = (0..(3 * BLOCK as usize)).map(|i| (i % 251) as u8).collect();
+        let out = stream(
+            &mut Cursor::new(payload),
+            s.as_mut(),
+            None,
+            &NeverCancel,
+            &mut rep,
+        )
+        .unwrap();
+
+        // 윈도우가 MBR 디스크 서명 자리를 덮어쓴 상황을 흉내낸다.
+        let mut first = vec![0u8; 512];
+        s.read_at(0, &mut first).unwrap();
+        first[440..444].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        s.write_at(0, &first).unwrap();
+        s.commit().unwrap();
+
+        let mut rep2 = ProgressReporter::new(|_| {});
+        let err = verify(
+            s.as_mut(),
+            out.bytes,
+            &out.hash,
+            &out.blocks,
+            &NeverCancel,
+            &mut rep2,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SinkError::VerifyMismatch { at: 0 }),
+            "파티션 테이블 훼손이 0 번 블록으로 보고되지 않았다: {err:?}"
+        );
     }
 }

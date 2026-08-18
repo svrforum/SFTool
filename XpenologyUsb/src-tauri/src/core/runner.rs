@@ -44,11 +44,15 @@ pub enum RunError {
     Device(DeviceError),
     /// 검증 불일치.
     ///
-    /// **어디서 어긋났는지는 담지 않는다.** [`sink::verify`] 는 되읽은 전체를
-    /// 해시 하나로 묶어 한 번 비교하므로 위치를 구할 수 없다. 예전에는 여기에
-    /// `offset: 0` 을 적어 넣었는데, 그 값은 계산된 적이 없으면서 하필
-    /// 파티션 테이블 자리를 가리켜서 보고를 받은 사람을 엉뚱한 코드로 보냈다.
-    VerifyMismatch,
+    /// `at` 은 **처음 어긋난 [`sink::BLOCK`] 의 시작 오프셋**이다. 실제로
+    /// 계산된 값이며, 예전처럼 자리를 채우려고 넣은 0 이 아니다.
+    ///
+    /// 이 값이 있어야 원인을 좁힐 수 있다. `at` 이 0 이면 어긋난 곳은 맨 앞
+    /// 1MiB — 즉 홀드백이 마지막에 놓는 파티션 테이블 구간이고, 그건 장치
+    /// 불량이 아니라 윈도우가 그 구간을 건드렸다는 뜻이 된다. `at` 이 그보다
+    /// 뒤면 본문이 어긋난 것이라 장치 쪽을 의심하는 게 맞다. 둘을 구분하지
+    /// 못하는 동안 원인을 추측으로 골라야 했다.
+    VerifyMismatch { at: u64 },
     /// **대상이 이미 지워진 뒤에** 실패했다.
     ///
     /// [`crate::device::RawWriter::open`] 은 그 안에서 마운트 지점을 떼고
@@ -89,7 +93,7 @@ impl From<SinkError> for RunError {
             SinkError::TooSmall { need, have } => {
                 RunError::Rejected(Rejection::TooSmall { need, have })
             }
-            SinkError::VerifyMismatch => RunError::VerifyMismatch,
+            SinkError::VerifyMismatch { at } => RunError::VerifyMismatch { at },
             SinkError::Canceled => RunError::Canceled,
         }
     }
@@ -364,7 +368,14 @@ fn write_to_target<F: FnMut(super::pipeline::ProgressEvent)>(
         // 후자가 실물에서 났다 — 멀쩡히 써진 USB 가 불량으로 보고됐다.
         session.commit()?;
         rep.begin(Stage::Verifying, None);
-        sink::verify(session.as_mut(), out.bytes, &out.hash, cancel, rep)?;
+        sink::verify(
+            session.as_mut(),
+            out.bytes,
+            &out.hash,
+            &out.blocks,
+            cancel,
+            rep,
+        )?;
     }
 
     rep.begin(Stage::Finishing, None);
@@ -824,7 +835,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(cause(&err), RunError::VerifyMismatch),
+            matches!(cause(&err), RunError::VerifyMismatch { .. }),
             "손상을 잡지 못했다: {err:?}"
         );
     }
@@ -894,7 +905,7 @@ mod tests {
 
         let text = format!("{err:?}");
         assert!(
-            matches!(cause(&err), RunError::VerifyMismatch),
+            matches!(cause(&err), RunError::VerifyMismatch { .. }),
             "실제: {text}"
         );
         assert!(
