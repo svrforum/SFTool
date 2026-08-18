@@ -27,7 +27,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -35,9 +35,9 @@ jobs:
         with:
           workspaces: XpenologyUsb/src-tauri
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: XpenologyUsb/package-lock.json
 
@@ -51,7 +51,7 @@ jobs:
         working-directory: XpenologyUsb/src-tauri
 
       - name: Build
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -87,7 +87,9 @@ jobs:
             WebView2를 자동으로 설치해 줍니다.
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: false
+          # v1 에서 includeUpdaterJson 이 이 이름으로 바뀌었다. 자동 업데이트를
+          # 쓰지 않으므로 latest.json 을 올리지 않는다.
+          uploadUpdaterJson: false
 
       # 포터블 단일 실행 파일을 올린다.
       #
