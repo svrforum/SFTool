@@ -210,12 +210,24 @@ fn copy_to_target<F: FnMut(ProgressEvent)>(
     sink::zero_tail(dst.as_mut(), out.bytes)?;
 
     // --- 검증 (선택) --------------------------------------------------------
-    if cfg.verify {
-        // 굽기 경로와 같은 이유로 되읽기 전에 매체로 내려보낸다.
-        // 자세한 사정은 `WriteSession::commit` 의 주석에 있다.
+    //
+    // 굽기 경로와 순서가 같다. 파티션 테이블이 아직 `out.head` 에 들려 있어
+    // 대상에는 유효한 테이블이 없고, 그래서 윈도우가 마운트해 끼어들 수 없다.
+    let head_len = out.head.len() as u64;
+    // 이미지 전체가 맨 앞 1MiB 에 들어가면 본문 구간 자체가 없다.
+    if cfg.verify && out.bytes > head_len {
         dst.commit()?;
         rep.begin(Stage::Verifying, None);
-        sink::verify(dst.as_mut(), out.bytes, &out.hash, &out.blocks, cancel, rep)?;
+        sink::verify(dst.as_mut(), head_len, out.bytes, &out.blocks, cancel, rep)?;
+    }
+
+    // 파티션 테이블을 놓는다. 대상에 대한 마지막 쓰기다.
+    sink::write_head(dst.as_mut(), &out.head)?;
+
+    if cfg.verify {
+        dst.commit()?;
+        rep.begin(Stage::Verifying, None);
+        sink::verify(dst.as_mut(), 0, head_len, &out.blocks, cancel, rep)?;
     }
 
     // --- 마무리 -------------------------------------------------------------

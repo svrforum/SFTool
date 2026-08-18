@@ -120,6 +120,12 @@ pub struct SinkOutcome {
     pub hash: [u8; 32],
     /// [`BLOCK`] 단위 해시. 어긋난 위치를 짚기 위한 것이다.
     pub blocks: Vec<[u8; 32]>,
+    /// 아직 쓰지 않은 이미지 맨 앞 — 파티션 테이블이 들어 있다.
+    ///
+    /// [`stream`] 은 이것을 **쓰지 않고 돌려준다.** 장치에 놓는 순간 윈도우가
+    /// 파티션을 인식해 마운트하고, 그때부터 우리가 쓴 영역이 남의 손에 들어가기
+    /// 때문이다. 검증을 다 끝낸 뒤 [`write_head`] 로 놓는다.
+    pub head: Vec<u8>,
 }
 
 /// 쓰기 실패 원인.
@@ -250,8 +256,16 @@ pub fn stream<F: FnMut(ProgressEvent)>(
         return Err(SinkError::EmptySource);
     }
 
-    // 보류해 둔 맨 앞을 이제 쓴다. 여기서 비로소 장치에 유효한 파티션 테이블이
-    // 생기지만, 나머지는 이미 다 쓰인 뒤라 윈도우가 볼륨을 마운트해도 늦다.
+    // 보류해 둔 맨 앞은 **여기서 쓰지 않는다.**
+    //
+    // 예전에는 여기서 썼다. 나머지가 이미 다 쓰인 뒤이므로 윈도우가 볼륨을
+    // 마운트해도 늦다고 봤는데, 되읽어 검증하는 단계가 생기면서 그 전제가
+    // 깨졌다. 유효한 파티션 테이블이 놓이는 순간 윈도우는 첫 파티션을 마운트하고
+    // FAT 드라이버가 마운트 메타데이터를 **우리가 방금 쓴 영역 안에** 쓴다.
+    // 그 뒤에 되읽으면 당연히 다르고, 멀쩡한 USB 가 불량으로 보고된다.
+    //
+    // 그래서 호출부가 검증을 마친 뒤 [`write_head`] 로 놓는다. 파티션 테이블이
+    // 없는 동안에는 윈도우가 마운트할 것이 없으므로 아무도 끼어들지 못한다.
     if !holdback.is_empty() {
         let raw = holdback.len();
         let padded = raw.div_ceil(sector) * sector;
@@ -268,7 +282,6 @@ pub fn stream<F: FnMut(ProgressEvent)>(
             tally.update(&holdback[raw..]);
             offset = offset.max(padded as u64);
         }
-        session.write_at(0, &holdback)?;
     }
 
     let (hash, blocks) = tally.finish();
@@ -276,7 +289,20 @@ pub fn stream<F: FnMut(ProgressEvent)>(
         bytes: offset,
         hash,
         blocks,
+        head: holdback,
     })
+}
+
+/// 보류해 둔 맨 앞을 장치에 놓는다. **가장 마지막에 일어나는 쓰기다.**
+///
+/// 이 호출 전까지 장치에는 유효한 파티션 테이블이 없다. 그래서 그 전에 하는
+/// 되읽기 검증은 윈도우의 방해를 받지 않는다.
+pub fn write_head(session: &mut dyn WriteSession, head: &[u8]) -> Result<(), SinkError> {
+    if head.is_empty() {
+        return Ok(());
+    }
+    session.write_at(0, head)?;
+    Ok(())
 }
 
 /// 장치 끝을 0 으로 덮는다.
@@ -296,26 +322,35 @@ pub fn zero_tail(session: &mut dyn WriteSession, written: u64) -> Result<(), Sin
 ///
 /// 불량 USB 는 쓰기가 성공했다고 보고하고도 내용이 다른 경우가 있다.
 /// 이 대조가 유일하게 그것을 잡는다.
+/// `from`..`to` 를 되읽어 기록된 블록 해시와 대조한다.
+///
+/// `from` 은 [`BLOCK`] 배수여야 한다. 범위를 받는 이유는 **본문과 맨 앞을 따로,
+/// 다른 시점에** 확인하기 때문이다. 본문은 파티션 테이블이 놓이기 전에 —
+/// 즉 윈도우가 마운트할 것이 없는 동안 — 확인하고, 맨 앞은 그것을 놓은 직후에
+/// 확인한다.
 pub fn verify<F: FnMut(ProgressEvent)>(
     session: &mut dyn WriteSession,
-    bytes: u64,
-    expected: &[u8; 32],
+    from: u64,
+    to: u64,
     blocks: &[[u8; 32]],
     cancel: &dyn Cancel,
     rep: &mut ProgressReporter<F>,
 ) -> Result<(), SinkError> {
+    debug_assert!(
+        from >= to || from.is_multiple_of(BLOCK),
+        "검증 시작은 블록 경계여야 한다"
+    );
     let sector = session.sector_size() as usize;
     let mut back = vec![0u8; BLOCK as usize];
-    let mut whole = Sha256::new();
-    let mut pos = 0u64;
-    let mut index = 0usize;
+    let mut pos = from;
+    let mut index = (from / BLOCK) as usize;
     let mut last_v = std::time::Instant::now();
 
-    while pos < bytes {
+    while pos < to {
         if cancel.is_canceled() {
             return Err(SinkError::Canceled);
         }
-        let n = BLOCK.min(bytes - pos) as usize;
+        let n = BLOCK.min(to - pos) as usize;
         // 읽기도 섹터 배수여야 한다.
         let n = (n / sector) * sector;
         if n == 0 {
@@ -323,7 +358,6 @@ pub fn verify<F: FnMut(ProgressEvent)>(
         }
         let at = pos;
         session.read_at(at, &mut back[..n])?;
-        whole.update(&back[..n]);
 
         // 블록마다 그 자리에서 대조한다. 전체 해시 하나만 보면 어긋났다는
         // 사실만 남고 위치가 사라진다 — 그러면 원인을 추측으로 골라야 한다.
@@ -356,20 +390,11 @@ pub fn verify<F: FnMut(ProgressEvent)>(
         let now = std::time::Instant::now();
         rep.update(
             pos,
-            Some(bytes),
+            Some(to),
             now.duration_since(last_v).as_secs_f64(),
             n as u64,
         );
         last_v = now;
-    }
-
-    // 블록이 전부 맞았는데 전체가 다르면 블록 경계 밖에서 어긋난 것이다.
-    // 여기까지 오면 안 되지만, 조용히 통과시키느니 남은 범위를 짚어 준다.
-    if whole.finalize().as_slice() != expected.as_slice() {
-        return Err(SinkError::VerifyMismatch {
-            at: pos,
-            reread: Reread::SameAgain,
-        });
     }
     Ok(())
 }
@@ -447,10 +472,11 @@ mod tests {
         .unwrap();
 
         let mut rep2 = ProgressReporter::new(|_| {});
+        write_head(s.as_mut(), &out.head).unwrap();
         verify(
             s.as_mut(),
+            0,
             out.bytes,
-            &out.hash,
             &out.blocks,
             &NeverCancel,
             &mut rep2,
@@ -474,6 +500,7 @@ mod tests {
             &mut rep,
         )
         .unwrap();
+        write_head(s.as_mut(), &out.head).unwrap();
 
         // 3번 블록 안의 한 섹터를 뒤집는다.
         let corrupt_at = 3 * BLOCK + 4096;
@@ -486,8 +513,8 @@ mod tests {
         let mut rep2 = ProgressReporter::new(|_| {});
         let err = verify(
             s.as_mut(),
+            0,
             out.bytes,
-            &out.hash,
             &out.blocks,
             &NeverCancel,
             &mut rep2,
@@ -516,6 +543,7 @@ mod tests {
             &mut rep,
         )
         .unwrap();
+        write_head(s.as_mut(), &out.head).unwrap();
 
         // 윈도우가 MBR 디스크 서명 자리를 덮어쓴 상황을 흉내낸다.
         let mut first = vec![0u8; 512];
@@ -527,8 +555,8 @@ mod tests {
         let mut rep2 = ProgressReporter::new(|_| {});
         let err = verify(
             s.as_mut(),
+            0,
             out.bytes,
-            &out.hash,
             &out.blocks,
             &NeverCancel,
             &mut rep2,

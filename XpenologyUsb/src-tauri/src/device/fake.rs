@@ -169,10 +169,38 @@ pub struct FakeSession {
     /// 아직 매체에 닿지 않은 쓰기.
     pending: Vec<(u64, Vec<u8>)>,
     committed: Arc<Mutex<bool>>,
+    /// 유효한 파티션 테이블이 놓이면 윈도우처럼 끼어들어 쓴다.
+    automount: bool,
+    /// 이미 끼어들었는가. 윈도우는 마운트할 때 한 번 쓰지, 볼 때마다 쓰지 않는다.
+    scribbled: bool,
 }
 
 impl FakeSession {
     /// 붙들고 있던 쓰기를 실제 버퍼에 내려놓는다.
+    /// 파티션 테이블이 놓인 직후 윈도우가 하는 짓을 흉내낸다.
+    ///
+    /// 유효한 MBR 이 보이면 윈도우는 파티션을 인식해 마운트하고, FAT 드라이버가
+    /// 마운트 시점 메타데이터(더티 비트 등)를 **우리가 방금 쓴 영역 안에** 쓴다.
+    /// 부팅에는 지장이 없지만 바이트는 달라진다. 실물에서 멀쩡한 USB 가 검증에
+    /// 실패한 것이 이 그림이고, 가짜가 이걸 흉내내지 않는 동안 테스트는 전부
+    /// 초록불이었다.
+    fn windows_scribbles(&mut self) {
+        if !self.automount || self.scribbled {
+            return;
+        }
+        let mut d = self.data.lock().unwrap();
+        if d.len() < 512 || d[510] != 0x55 || d[511] != 0xAA {
+            return;
+        }
+        // 첫 파티션 시작(1MiB) 근처의 부트 섹터에 더티 비트를 세운다.
+        // 한 번만이다. 마운트할 때 쓰는 것이지 되읽을 때마다 쓰는 것이 아니다.
+        let spot = 1024 * 1024 + 0x25;
+        if spot < d.len() {
+            d[spot] = d[spot].wrapping_add(1);
+            self.scribbled = true;
+        }
+    }
+
     fn land(&mut self) -> Result<(), DeviceError> {
         let mut d = self.data.lock().unwrap();
         for (offset, buf) in self.pending.drain(..) {
@@ -180,6 +208,8 @@ impl FakeSession {
             d[offset as usize..end].copy_from_slice(&buf);
         }
         *self.committed.lock().unwrap() = true;
+        drop(d);
+        self.windows_scribbles();
         Ok(())
     }
 }
@@ -243,6 +273,10 @@ impl WriteSession for FakeSession {
             return Ok(());
         }
         d[offset as usize..end].copy_from_slice(buf);
+        drop(d);
+        if offset == 0 {
+            self.windows_scribbles();
+        }
         Ok(())
     }
 
@@ -308,6 +342,7 @@ pub struct FakeWriter {
     /// 쓰기를 캐시에 붙들고 `commit` 에서야 매체에 내려놓는 장치로 만든다.
     buffered: bool,
     committed: Arc<Mutex<bool>>,
+    automount: bool,
 }
 
 impl FakeWriter {
@@ -323,7 +358,18 @@ impl FakeWriter {
             opened: Arc::new(Mutex::new(false)),
             buffered: false,
             committed: Arc::new(Mutex::new(false)),
+            automount: false,
         }
+    }
+
+    /// 파티션 테이블이 놓이는 순간 **윈도우가 끼어들어 쓰는** 장치로 만든다.
+    ///
+    /// 실물 USB 에서 검증이 멀쩡한 쓰기를 불량으로 보고한 상황이다. CI 의 가상
+    /// 디스크로는 재현되지 않는다 — 시험용 이미지가 리눅스 파티션(0x83)이라
+    /// 윈도우가 아예 마운트하지 않기 때문이다.
+    pub fn automounting(mut self) -> Self {
+        self.automount = true;
+        self
     }
 
     /// 실제 윈도우 핸들처럼 **쓰기를 캐시에 붙들고 있는** 장치로 만든다.
@@ -406,6 +452,8 @@ impl RawWriter for FakeWriter {
             buffered: self.buffered,
             pending: Vec::new(),
             committed: Arc::clone(&self.committed),
+            automount: self.automount,
+            scribbled: false,
         }))
     }
 }

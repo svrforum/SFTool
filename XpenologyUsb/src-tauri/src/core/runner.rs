@@ -361,21 +361,37 @@ fn write_to_target<F: FnMut(super::pipeline::ProgressEvent)>(
     let out = sink::stream(stream, session.as_mut(), expanded_size, cancel, rep)?;
     sink::zero_tail(session.as_mut(), out.bytes)?;
 
-    if cfg.verify {
-        // 되읽기 전에 캐시를 매체로 내려보낸다. 이 한 줄이 없으면 검증은
-        // 방금 쓴 캐시를 되읽어 자기 자신과 비교하거나, 홀드백 때문에 막
-        // 붙기 시작한 볼륨이 캐시를 버리면 쓰기 이전 내용을 읽는다.
-        // 후자가 실물에서 났다 — 멀쩡히 써진 USB 가 불량으로 보고됐다.
+    // 순서가 핵심이다. 이 시점의 장치에는 **유효한 파티션 테이블이 없다** —
+    // 이미지 맨 앞은 아직 `out.head` 에 들려 있다. 그래서 지금 되읽는 본문은
+    // 윈도우가 마운트할 수 없는 상태이고, 아무도 끼어들지 못한다.
+    //
+    // 예전에는 파티션 테이블을 먼저 놓고 전체를 검증했다. 그러면 윈도우가 첫
+    // 파티션을 마운트하고 FAT 드라이버가 마운트 메타데이터를 방금 쓴 영역에
+    // 써 넣은 뒤에 되읽게 된다. 멀쩡한 USB 가 불량으로 보고된 이유가 그것이다.
+    let head_len = out.head.len() as u64;
+    // 이미지 전체가 맨 앞 1MiB 에 들어가면 본문 구간 자체가 없다.
+    if cfg.verify && out.bytes > head_len {
         session.commit()?;
         rep.begin(Stage::Verifying, None);
         sink::verify(
             session.as_mut(),
+            head_len,
             out.bytes,
-            &out.hash,
             &out.blocks,
             cancel,
             rep,
         )?;
+    }
+
+    // 이제 파티션 테이블을 놓는다. 장치에 대한 마지막 쓰기다.
+    sink::write_head(session.as_mut(), &out.head)?;
+
+    // 맨 앞 1MiB 는 놓은 직후에 확인한다. 윈도우가 장치 변화를 알아차리기까지는
+    // 시간이 걸리고, 여기서 읽는 양은 1MiB 뿐이다.
+    if cfg.verify {
+        session.commit()?;
+        rep.begin(Stage::Verifying, None);
+        sink::verify(session.as_mut(), 0, head_len, &out.blocks, cancel, rep)?;
     }
 
     rep.begin(Stage::Finishing, None);
@@ -813,6 +829,42 @@ mod tests {
         )
         .expect("검증 전에 매체로 내려보내지 않아 멀쩡한 쓰기를 불량으로 보고했다");
         assert!(writer.was_committed(), "검증 전에 commit 이 불리지 않았다");
+    }
+
+    #[test]
+    fn windows_touching_the_disk_after_the_table_lands_is_not_the_users_problem() {
+        // 실물에서 멀쩡한 USB 가 계속 검증에 실패했다. 장치도 대조도 문제가
+        // 아니었다 — 홀드백이 파티션 테이블을 놓는 순간 윈도우가 첫 파티션을
+        // 마운트하고, FAT 드라이버가 우리가 방금 쓴 영역 안에 마운트 메타데이터를
+        // 쓴다. 그 다음에 되읽으니 당연히 다르다.
+        //
+        // CI 의 가상 디스크는 시험 이미지가 리눅스 파티션이라 마운트되지 않아서
+        // 이 상황을 한 번도 만들지 않았다.
+        let image: Vec<u8> = (0..(3 * 1024 * 1024u32))
+            .map(|i| {
+                // 유효한 MBR 서명을 넣어 마운트 조건을 만든다.
+                match i {
+                    510 => 0x55,
+                    511 => 0xAA,
+                    _ => (i % 251) as u8,
+                }
+            })
+            .collect();
+        let io = FakeIo::new(image);
+        let writer = FakeWriter::new(16 * 1024 * 1024, 512).automounting();
+        run(
+            RunConfig {
+                loader: Loader::MShell,
+                verify: true,
+            },
+            &usb(),
+            &HashSet::new(),
+            &io,
+            &writer,
+            &NeverCancel,
+            |_| {},
+        )
+        .expect("윈도우가 나중에 건드린 것 때문에 멀쩡한 쓰기가 불량으로 보고됐다");
     }
 
     #[test]
