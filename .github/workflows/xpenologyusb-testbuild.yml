@@ -1,0 +1,64 @@
+name: XpenologyUsb Test Build
+
+# 릴리스를 만들지 않고 시험용 실행 파일만 뽑는다.
+#
+# 왜 필요한가: 백신 탐지는 실물 Windows 에서만 확인된다. 그런데 확인하겠다고
+# 릴리스를 찍으면 잡히는 파일이 하나씩 늘어난다. 백신의 판정은 해시 하나가
+# 아니라 비슷한 파일 무리에 걸리므로, 시험할 때마다 릴리스를 내는 것은 상황을
+# 악화시킨다. 여기서는 산출물을 아티팩트로만 올린다 — 받아서 시험하고, 통과한
+# 것만 태그를 찍어 릴리스한다.
+#
+# 실행: Actions 탭 → XpenologyUsb Test Build → Run workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: '무엇을 시험하는 빌드인가 (아티팩트 이름에 붙는다)'
+        required: true
+        default: 'candidate'
+
+jobs:
+  build:
+    name: Build a test executable
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: XpenologyUsb/src-tauri
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: XpenologyUsb/package-lock.json
+
+      - run: npm ci
+        working-directory: XpenologyUsb
+
+      - run: npm run build
+        working-directory: XpenologyUsb
+
+      - name: Build the release binary
+        run: npm run tauri build -- --no-bundle
+        working-directory: XpenologyUsb
+
+      - name: Report the hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="XpenologyUsb/src-tauri/target/release/xpenologyusb.exe"
+          test -f "$src" || { echo "실행 파일이 없다: $src"; exit 1; }
+          echo "SHA-256: $(sha256sum "$src" | cut -d' ' -f1)"
+          echo "커밋: ${GITHUB_SHA}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xpenologyusb-${{ inputs.note }}-${{ github.sha }}
+          path: XpenologyUsb/src-tauri/target/release/xpenologyusb.exe
+          retention-days: 14
