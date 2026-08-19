@@ -116,11 +116,20 @@ const state: State = {
   target: null,
   plan: null,
   loader: 'MShell',
-  // 기본으로 켠다. 쓰기가 끝났다는 말은 장치가 오류를 안 냈다는 뜻일 뿐이고,
-  // 불량 USB 는 조용히 다른 바이트를 돌려준다. 그건 부팅이 안 되는 시점에야
-  // 드러나고, 그때는 원인이 USB 인지 로더인지 알 수 없다. 시간이 두 배로
-  // 드는 대신 그 구분을 여기서 끝낸다.
-  verify: true,
+  // 기본으로 끈다. 기능이 미덥지 않아서가 아니라 **백신 때문**이다.
+  //
+  // 검증을 켜면 파티션 테이블을 쓰기 전에 디스크 전체를 되읽어야 한다. 그러면
+  // I/O 순서가 "디스크를 전부 훑은 뒤 부트섹터를 찍는다" 가 되는데, 그것이
+  // 부트킷의 순서라 Windows Defender 가 Behavior:Win32/Persistence.A!ml 로
+  // 막는다. 서명이 없어서 더 그렇다. 0.4.2 는 이 순서가 아니었고 잡히지 않았다.
+  //
+  // 되읽기를 파티션 테이블보다 **뒤에** 하면 순서 문제는 사라지지만, 그때는
+  // 윈도우가 볼륨을 마운트해 FAT 메타데이터를 써 넣은 뒤라 멀쩡한 USB 가
+  // 불량으로 보고된다. 둘을 동시에 만족시키는 순서가 없다.
+  //
+  // 그래서 판단이 필요한 쪽을 사용자에게 넘긴다. 끈 상태의 순서는 0.4.2 와
+  // 같으므로 기본 경로는 잡히지 않는다.
+  verify: false,
   simulated: false,
   loading: true,
   progress: null,
@@ -689,8 +698,8 @@ function startMode(mode: Mode) {
   state.mode = mode;
   state.step = 1;
   // 갈래를 옮길 때마다 기본값으로 되돌린다. 두 확인 화면 모두 체크박스를
-  // 보여주므로, 앞선 갈래에서 끈 것이 다음 갈래까지 따라가지 않게 한다.
-  state.verify = true;
+  // 보여주므로, 앞선 갈래에서 켠 것이 다음 갈래까지 따라가지 않게 한다.
+  state.verify = false;
   state.selectedDisk = null;
   state.source = null;
   state.target = null;
