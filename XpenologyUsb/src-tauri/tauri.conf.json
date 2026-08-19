@@ -28,6 +28,11 @@
   },
   "bundle": {
     "active": true,
+    "publisher": "svrforum",
+    "copyright": "Copyright (c) 2026 svrforum. MIT License.",
+    "category": "Utility",
+    "shortDescription": "Xpenology 부트로더를 USB에 굽는 프로그램",
+    "longDescription": "Writes Xpenology bootloader images (m-shell / RR) to a USB drive. Open source, MIT licensed, built from source by GitHub Actions. https://github.com/svrforum/SFTool",
     "targets": [
       "nsis"
     ],
