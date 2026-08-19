@@ -1,6 +1,6 @@
 [package]
 name = "xpenologyusb"
-version = "0.4.3"
+version = "0.4.4"
 description = "Xpenology 부트로더를 USB에 굽는 프로그램"
 authors = ["svrforum"]
 license = "MIT"
