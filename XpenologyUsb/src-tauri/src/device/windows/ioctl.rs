@@ -963,64 +963,6 @@ pub fn delete_drive_layout(h: &OwnedHandle) -> Result<(), DeviceError> {
 
 /// 드라이브 문자를 뗀다.
 ///
-/// 새 볼륨에 드라이브 문자를 자동으로 붙이는 기능을 켜고 끈다.
-///
-/// **왜 필요한가.** 이미지의 파티션 테이블이 장치에 놓이는 순간 윈도우는 그
-/// 파티션을 볼륨으로 인식하고 문자를 붙인다. 로더 이미지의 첫 파티션은 보통
-/// FAT 라서 윈도우가 읽을 수 있고, 그러면 자동 실행이 탐색기 창을 띄운다.
-/// 굽는 동안 창이 계속 튀어나오는 것이 그것이다.
-///
-/// 이것은 **시스템 전역 설정**이다 (`mountvol /N` 과 같은 것). 그래서 원래 값을
-/// 먼저 읽어 두고 작업이 끝나면 반드시 되돌린다 — 되돌리지 않으면 사용자의 다른
-/// USB 도 문자를 받지 못한다. 되돌리기는 `Drop` 에 두어 취소와 오류에도 실행된다.
-///
-/// 관리자 권한이 필요하다. 실패는 치명적이지 않다 — 창이 뜰 뿐이므로 호출부는
-/// 무시해도 된다.
-pub fn set_auto_mount(enabled: bool) -> Result<(), DeviceError> {
-    // CTL_CODE(MOUNTMGRCONTROLTYPE=0x6D, 16, METHOD_BUFFERED, READ|WRITE)
-    const IOCTL_MOUNTMGR_SET_AUTO_MOUNT: u32 = 0x006D_C040;
-    let h = get_handle(r"\\.\MountPointManager", false, true, "자동 마운트 설정")?;
-    let state: u32 = u32::from(enabled);
-    // 안전성: state 는 이 호출 동안 살아 있고 크기도 정확히 넘긴다.
-    unsafe {
-        DeviceIoControl(
-            h.raw(),
-            IOCTL_MOUNTMGR_SET_AUTO_MOUNT,
-            Some(std::ptr::addr_of!(state).cast()),
-            std::mem::size_of::<u32>() as u32,
-            None,
-            0,
-            None,
-            None,
-        )
-    }
-    .map_err(|_| last_error_in("자동 마운트 설정"))
-}
-
-/// 지금 자동 마운트가 켜져 있는가.
-pub fn auto_mount_enabled() -> Result<bool, DeviceError> {
-    // CTL_CODE(MOUNTMGRCONTROLTYPE=0x6D, 15, METHOD_BUFFERED, FILE_ANY_ACCESS)
-    const IOCTL_MOUNTMGR_QUERY_AUTO_MOUNT: u32 = 0x006D_003C;
-    let h = get_handle(r"\\.\MountPointManager", false, false, "자동 마운트 조회")?;
-    let mut state: u32 = 0;
-    let mut returned = 0u32;
-    // 안전성: state 는 u32 하나이고 그만큼만 받는다.
-    unsafe {
-        DeviceIoControl(
-            h.raw(),
-            IOCTL_MOUNTMGR_QUERY_AUTO_MOUNT,
-            None,
-            0,
-            Some(std::ptr::addr_of_mut!(state).cast()),
-            std::mem::size_of::<u32>() as u32,
-            Some(&mut returned),
-            None,
-        )
-    }
-    .map_err(|_| last_error_in("자동 마운트 조회"))?;
-    Ok(state != 0)
-}
-
 /// 문자가 붙어 있으면 Windows 가 볼륨을 계속 다시 마운트한다.
 /// 실패는 무시한다 — 문자가 이미 없을 수 있다.
 pub fn remove_mount_point(letter: char) {

@@ -278,21 +278,6 @@ impl WindowsRawWriter {
         let align = (sector_size as usize).max(4096);
         let bounce = ioctl::AlignedBuf::new(BOUNCE_BYTES, align);
 
-        // 파티션 테이블이 놓이면 윈도우가 볼륨에 문자를 붙이고 자동 실행이
-        // 탐색기 창을 띄운다. 굽는 동안 창이 계속 튀어나오는 것이 그것이다.
-        // 작업하는 동안만 꺼 두고 Drop 에서 되돌린다.
-        //
-        // 실패해도 넘어간다 — 창이 뜨는 것은 성가실 뿐 굽기를 막지 않는다.
-        let auto_mount_was = match ioctl::auto_mount_enabled() {
-            Ok(true) => match ioctl::set_auto_mount(false) {
-                Ok(()) => Some(true),
-                Err(_) => None,
-            },
-            // 이미 꺼져 있으면 건드리지 않는다. 사용자가 꺼 둔 것일 수 있고,
-            // 그렇다면 우리가 켜 주는 쪽이 더 큰 참견이다.
-            _ => None,
-        };
-
         Ok(WindowsSession {
             handle: Some(handle),
             _locked: std::mem::take(locked),
@@ -302,7 +287,6 @@ impl WindowsRawWriter {
             disk_number: disk.number,
             bounce,
             prep_notes,
-            auto_mount_was,
         })
     }
 
@@ -348,11 +332,6 @@ pub struct WindowsSession {
     /// 세션에서 나가는 **모든** 오류에 이것이 실린다. 예전에는 쓰기 거부 한
     /// 갈래에만 붙어서, 정작 자주 나는 잠금 실패는 이름 한 단어로 올라갔다.
     prep_notes: String,
-    /// 세션을 시작하기 전의 자동 마운트 설정. `Some(true)` 면 우리가 껐다는 뜻이다.
-    ///
-    /// 시스템 전역 설정이라 반드시 되돌려야 한다. `Drop` 에 두어 취소와 오류에도
-    /// 실행되게 한다.
-    auto_mount_was: Option<bool>,
 }
 
 impl WriteSession for WindowsSession {
@@ -468,23 +447,6 @@ impl Drop for WindowsSession {
         let disk_number = self.disk_number;
         if let Some(h) = self.handle.take() {
             drop(h);
-        }
-
-        // 자동 마운트를 원래대로 되돌린다. **파티션 테이블 재인식 뒤에** 한다 —
-        // 먼저 되돌리면 그 재인식이 곧바로 문자를 붙여 탐색기가 뜬다.
-        //
-        // 여기까지 왔다는 것은 정상 종료든 취소든 오류든 세션이 끝났다는 뜻이다.
-        // 프로세스가 강제 종료되면 되돌리지 못하는데, 그때는 `mountvol /E` 로
-        // 사용자가 직접 켤 수 있다.
-        if self.auto_mount_was == Some(true) {
-            // 볼륨 도착은 비동기다. 곧바로 되돌리면 우리가 방금 알린 재인식이
-            // **켜진 상태로** 처리돼 문자가 붙고, 막으려던 창이 그대로 뜬다.
-            // 자동 마운트 여부는 볼륨이 도착하는 시점에 판정되므로, 그 처리가
-            // 지나가고 나면 되돌려도 이 볼륨에 소급 적용되지 않는다.
-            //
-            // 굽기 전체가 몇 분인데 이건 그 끝의 한순간이라 사용자에게 보이지 않는다.
-            std::thread::sleep(std::time::Duration::from_millis(700));
-            let _ = ioctl::set_auto_mount(true);
         }
 
         // **여기서 꺼내지 않는다.** 예전에는 자동으로 꺼냈는데, 실패해도
