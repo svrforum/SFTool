@@ -45,6 +45,12 @@ jobs:
         run: npm ci
         working-directory: XpenologyUsb
 
+      - name: Test and build frontend
+        run: |
+          npm test
+          npm run build
+        working-directory: XpenologyUsb
+
       # 릴리스로 나가는 것이므로 테스트를 통과하지 못하면 여기서 멈춘다.
       - name: Test
         run: cargo test --all-targets

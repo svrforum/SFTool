@@ -13,6 +13,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct DiskEntry {
     pub number: u32,
+    pub selection_id: String,
     pub name: String,
     pub size_bytes: u64,
     /// 사람이 읽는 용량. 계산을 프런트엔드에 중복 구현하지 않기 위해 여기서 만든다.
@@ -83,6 +84,7 @@ fn to_entry(disk: &DiskInfo, availability: Availability) -> DiskEntry {
     };
     DiskEntry {
         number: disk.number,
+        selection_id: String::new(),
         name: disk.friendly_name.clone(),
         size_bytes: disk.size_bytes,
         size_label: format_bytes(disk.size_bytes),
@@ -117,6 +119,13 @@ pub struct DiskList {
 /// 감춰야 할 것은 여기서 이미 빠진다. 프런트엔드는 걸러내는 책임을 지지 않는다 —
 /// UI 버그가 내장 디스크를 노출시키는 경로를 아예 만들지 않기 위해서다.
 pub fn list_disks_with(enumerator: &dyn UsbEnumerator) -> Result<DiskList, String> {
+    list_disks_register_with(enumerator, |_| String::new())
+}
+
+pub fn list_disks_register_with(
+    enumerator: &dyn UsbEnumerator,
+    mut register: impl FnMut(&DiskInfo) -> String,
+) -> Result<DiskList, String> {
     let protected = enumerator
         .protected_disk_numbers()
         .map_err(|e| format!("{e:?}"))?;
@@ -128,7 +137,9 @@ pub fn list_disks_with(enumerator: &dyn UsbEnumerator) -> Result<DiskList, Strin
             .filter_map(|d| {
                 let a = safety::availability(d, &protected);
                 if a.is_visible() {
-                    Some(to_entry(d, a))
+                    let mut entry = to_entry(d, a);
+                    entry.selection_id = register(d);
+                    Some(entry)
                 } else {
                     None
                 }

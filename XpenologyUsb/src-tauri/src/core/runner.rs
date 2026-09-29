@@ -157,13 +157,15 @@ fn checksum_for(body: &str, asset_name: &str) -> Option<[u8; 32]> {
         .find(|l| {
             l.split_whitespace()
                 .nth(1)
-                .is_some_and(|n| n.trim_start_matches('*').ends_with(asset_name))
+                .is_some_and(|n| n.trim_start_matches('*').trim_start_matches("./") == asset_name)
         })
-        .or(if lines.len() == 1 {
-            lines.first()
-        } else {
-            None
-        })?;
+        .or(
+            if lines.len() == 1 && lines[0].split_whitespace().count() == 1 {
+                lines.first()
+            } else {
+                None
+            },
+        )?;
 
     let hex = pick.split_whitespace().next()?;
     if hex.len() != 64 {
@@ -285,29 +287,32 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
     // 받아졌다고 굽기 전체를 막으면 그게 더 나쁘다. **어긋난 것이 확인됐을 때만**
     // 멈춘다.
     if let Some(url) = &image.checksum_url {
-        if let Ok(body) = io.fetch_text(url) {
-            if let Some(want) = checksum_for(&body, &image.asset_name) {
-                let got: [u8; 32] = Sha256::digest(&compressed).into();
-                if got != want {
-                    return Err(RunError::Download(format!(
-                        "내려받은 파일이 발행자가 올린 체크섬과 다릅니다.\n                         받은 값: {}\n기대한 값: {}\n네트워크 중간 장비가 응답을 \
-                         건드렸을 수 있습니다. 다시 시도해 주세요.",
-                        hex32(&got),
-                        hex32(&want)
-                    )));
-                }
-            }
+        let body = io
+            .fetch_text(url)
+            .map_err(|e| RunError::Download(format!("공개된 체크섬을 확인하지 못했습니다: {e}")))?;
+        let want = checksum_for(&body, &image.asset_name).ok_or_else(|| {
+            RunError::Download("이미지에 해당하는 SHA-256 체크섬을 읽지 못했습니다".into())
+        })?;
+        let got: [u8; 32] = Sha256::digest(&compressed).into();
+        if got != want {
+            return Err(RunError::Download(format!(
+                "내려받은 파일이 발행자가 올린 체크섬과 다릅니다. 받은 값: {} 기대한 값: {}",
+                hex32(&got),
+                hex32(&want)
+            )));
         }
     }
 
-    // --- 3. 압축 해제 + 쓰기 ------------------------------------------------
-    // 푼 내용을 파일로 떨구지 않고 장치로 바로 흘려보낸다.
-    // 3GB 짜리 임시 파일을 만들지 않으므로 디스크 여유가 없는 기계에서도 동작한다.
     rep.begin(Stage::Extracting, None);
     let (mut stream, expanded_size) = io
         .open_decompressed(compressed, &image.asset_name)
         .map_err(RunError::Extract)?;
 
+    safety::can_write(disk, protected, expanded_size.unwrap_or(0), None)
+        .map_err(RunError::Rejected)?;
+    if cancel.is_canceled() {
+        return Err(RunError::Canceled);
+    }
     rep.begin(Stage::Preparing, None);
     let session = writer.open(disk)?;
 
@@ -417,6 +422,8 @@ mod tests {
         declared: u64,
         /// 릴리스가 함께 올린 sha256sum 파일의 내용. None 이면 안 올린 것.
         checksum: Option<String>,
+        checksum_error: bool,
+        expanded_size: Option<u64>,
     }
 
     impl FakeIo {
@@ -426,6 +433,8 @@ mod tests {
                 payload,
                 declared,
                 checksum: None,
+                checksum_error: false,
+                expanded_size: None,
             }
         }
 
@@ -467,6 +476,9 @@ mod tests {
         }
 
         fn fetch_text(&self, _url: &str) -> Result<String, String> {
+            if self.checksum_error {
+                return Err("HTTP 503".into());
+            }
             self.checksum
                 .clone()
                 .ok_or_else(|| "체크섬 파일이 없습니다".to_string())
@@ -490,7 +502,10 @@ mod tests {
             _name: &str,
         ) -> Result<(Box<dyn Read + Send>, Option<u64>), String> {
             let n = data.len() as u64;
-            Ok((Box::new(std::io::Cursor::new(data)), Some(n)))
+            Ok((
+                Box::new(std::io::Cursor::new(data)),
+                Some(self.expanded_size.unwrap_or(n)),
+            ))
         }
     }
 
@@ -1143,12 +1158,9 @@ mod tests {
         .expect("체크섬이 맞는데 막았다");
     }
 
-    /// 형식을 못 읽는 체크섬 파일 때문에 굽기가 막히면 안 된다.
-    ///
-    /// 저장소가 파일 모양을 바꾸는 날 프로그램이 통째로 쓸모없어진다.
-    /// 우리가 막으려는 것은 망가진 전송이지 낯선 형식이 아니다.
+    /// A published checksum that cannot be verified must fail before erasure.
     #[test]
-    fn an_unreadable_checksum_file_does_not_block_the_burn() {
+    fn an_unreadable_checksum_file_blocks_before_erasure() {
         let io = FakeIo::new(vec![7u8; 4096]).with_checksum("# 여기에 해시는 없습니다\n");
         let writer = FakeWriter::new(1024 * 1024, 512);
         run(
@@ -1163,7 +1175,8 @@ mod tests {
             &NeverCancel,
             |_| {},
         )
-        .expect("읽을 수 없는 체크섬 파일이 굽기를 막았다");
+        .expect_err("읽을 수 없는 체크섬을 무시했다");
+        assert!(!writer.was_opened());
     }
 
     #[test]
@@ -1203,5 +1216,67 @@ mod tests {
         assert!(matches!(err, RunError::Canceled));
         // 장치는 손대지 않은 상태여야 한다.
         assert!(writer.contents().iter().all(|b| *b == 0xAA));
+    }
+    #[test]
+    fn a_failed_checksum_request_never_opens_the_target() {
+        let mut io = FakeIo::new(vec![7; 4096]).with_checksum("unused");
+        io.checksum_error = true;
+        let writer = FakeWriter::new(1024 * 1024, 512);
+        let error = run(
+            RunConfig {
+                loader: Loader::MShell,
+                verify: false,
+            },
+            &usb(),
+            &HashSet::new(),
+            &io,
+            &writer,
+            &NeverCancel,
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(matches!(error, RunError::Download(_)));
+        assert!(!writer.was_opened());
+    }
+
+    #[test]
+    fn known_oversized_image_is_rejected_before_erasure() {
+        let mut io = FakeIo::new(vec![7; 4096]);
+        io.expanded_size = Some(usb().size_bytes + 512);
+        let writer = FakeWriter::new(1024 * 1024, 512);
+        let error = run(
+            RunConfig {
+                loader: Loader::MShell,
+                verify: false,
+            },
+            &usb(),
+            &HashSet::new(),
+            &io,
+            &writer,
+            &NeverCancel,
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            RunError::Rejected(Rejection::TooSmall { .. })
+        ));
+        assert!(!writer.was_opened());
+    }
+
+    #[test]
+    fn checksum_for_another_file_is_not_a_fallback() {
+        assert_eq!(
+            checksum_for(&format!("{} other.img", "ab".repeat(32)), "wanted.img"),
+            None
+        );
+        assert_eq!(
+            checksum_for(&format!("{} not-wanted.img", "ab".repeat(32)), "wanted.img"),
+            None
+        );
+        assert_eq!(
+            checksum_for(&"ab".repeat(32), "wanted.img"),
+            Some([0xab; 32])
+        );
     }
 }

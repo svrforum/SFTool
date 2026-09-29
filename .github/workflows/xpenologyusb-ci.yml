@@ -63,6 +63,8 @@ jobs:
       - run: npm ci
 
       # 프런트엔드가 먼저 빌드돼야 Tauri 가 dist 를 찾는다.
+      - run: npm test
+
       - run: npm run build
 
       - name: Check formatting
@@ -106,6 +108,8 @@ jobs:
           cache-dependency-path: XpenologyUsb/package-lock.json
 
       - run: npm ci
+
+      - run: npm test
 
       - run: npm run build
 

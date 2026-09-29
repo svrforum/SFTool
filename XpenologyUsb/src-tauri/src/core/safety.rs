@@ -263,12 +263,16 @@ pub fn confirm_identity(selected: &DiskInfo, observed: &DiskInfo) -> Result<(), 
             actual: observed.friendly_name.clone(),
         });
     }
+    if selected.serial != observed.serial {
+        return Err(IdentityMismatch::Serial);
+    }
     Ok(())
 }
 
 /// 쓰기 직전 신원 확인 실패 사유.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityMismatch {
+    Serial,
     Number { expected: u32, actual: u32 },
     BusType(BusType),
     Size { expected: u64, actual: u64 },
@@ -284,6 +288,7 @@ impl IdentityMismatch {
     /// 것인지(가짜 용량 USB 의 대표 증상이다) 구별할 방법이 없다.
     pub fn describe(&self) -> String {
         match self {
+            Self::Serial => "USB 시리얼이 달라졌습니다. 장치를 다시 선택해 주세요".into(),
             Self::Number { expected, actual } => format!(
                 "디스크 번호가 다릅니다: {expected} 번을 골랐는데 장치는 {actual} 번이라고 답합니다"
             ),
