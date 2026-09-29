@@ -931,6 +931,8 @@ async function startWrite() {
       state.progress = e.payload;
       if (state.step === 4) render();
     });
+    // A cancellation during event subscription must not start a new backend job.
+    if (state.canceling) throw new Error("Canceled");
 
     state.summary = await invoke<RunSummary>("write_image", {
       selectionId: state.selectionId,
@@ -975,6 +977,7 @@ async function startClone() {
       state.progress = e.payload;
       if (state.step === 4) render();
     });
+    if (state.canceling) throw new Error("Canceled");
 
     state.cloneSummary = await invoke<CloneSummary>("clone_disk", {
       source: state.sourceId,

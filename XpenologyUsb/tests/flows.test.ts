@@ -212,3 +212,38 @@ test("failed cancellation allows retry without leaving the running operation", a
     document.querySelector<HTMLButtonElement>("[data-cancel]")!.disabled,
   ).toBe(true);
 });
+
+test.each(["burn", "clone"])(
+  "%s cancellation while subscribing never starts a backend job",
+  async (mode) => {
+    let subscribed!: (unlisten: () => void) => void;
+    const unlisten = vi.fn();
+    listen.mockReturnValueOnce(
+      new Promise((resolve) => {
+        subscribed = resolve;
+      }),
+    );
+    click(`[data-mode="${mode}"]`);
+    await settle();
+    click('[data-disk="2"]');
+    if (mode === "burn") {
+      click('[data-go="2"]');
+      click('[data-go="3"]');
+    } else {
+      click('[data-disk="3"]');
+      await settle();
+    }
+    acknowledge();
+    click('[data-go="4"]');
+    click("[data-cancel]");
+    subscribed(unlisten);
+    await settle();
+    expect(
+      invoke.mock.calls.some(
+        ([name]) => name === "write_image" || name === "clone_disk",
+      ),
+    ).toBe(false);
+    expect(unlisten).toHaveBeenCalledOnce();
+    expect(document.querySelector("[data-cancel]")).toBeNull();
+  },
+);
