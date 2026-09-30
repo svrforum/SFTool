@@ -478,7 +478,7 @@ function burnScreen(): Screen {
     return {
       body: `
       ${steps(3)}
-      <main>
+      <main class="confirm-screen">
         <div class="eyebrow">3 / 4</div>
         <h1 class="danger">${nl(t("step3_title"))}</h1>
         <p class="lead">${esc(t("step3_lead"))}</p>
@@ -584,7 +584,7 @@ function cloneScreen(): Screen {
     return {
       body: `
       ${steps(3)}
-      <main>
+      <main class="confirm-screen">
         <div class="eyebrow">3 / 4</div>
         <h1 class="danger">${nl(t("clone_confirm_title"))}</h1>
         <div class="clone-confirm">

@@ -49,6 +49,10 @@ test("burn and clone screens: keyboard, consent, completion, themes, and layout"
   await page.goto("/");
   await expect(page.locator("html")).toHaveAttribute("lang", lang);
   await capture(page, info, "01-home");
+  await expect(page.locator('[data-mode="burn"]')).toBeInViewport({ ratio: 1 });
+  await expect(page.locator('[data-mode="clone"]')).toBeInViewport({
+    ratio: 1,
+  });
   await accessible(page);
 
   await page.locator('[data-mode="burn"]').focus();
@@ -62,6 +66,8 @@ test("burn and clone screens: keyboard, consent, completion, themes, and layout"
   await page.locator('[data-go="3"]').click();
   await expect(page.locator('[data-go="4"]')).toBeDisabled();
   await capture(page, info, "04-confirm");
+  if (page.viewportSize()!.width === 680)
+    await expect(page.locator("[data-ack]")).toBeInViewport({ ratio: 1 });
   await accessible(page);
   await page.locator("[data-ack]").focus();
   await page.keyboard.press("Space");
