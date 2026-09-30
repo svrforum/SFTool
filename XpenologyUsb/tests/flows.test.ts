@@ -247,3 +247,28 @@ test.each(["burn", "clone"])(
     expect(document.querySelector("[data-cancel]")).toBeNull();
   },
 );
+
+test("failed scan is distinguishable from an empty device list and can be retried", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  invoke.mockRejectedValueOnce(new Error("device scan unavailable"));
+  click('[data-mode="burn"]');
+  await settle();
+  expect(document.querySelector(".scan-error")).not.toBeNull();
+  expect(document.querySelector(".scan-error")!.textContent).toContain(
+    "device scan unavailable",
+  );
+  expect(
+    document.querySelector<HTMLButtonElement>('[data-go="2"]')!.disabled,
+  ).toBe(true);
+  click("[data-refresh]");
+  await settle();
+  expect(document.querySelector(".scan-error")).toBeNull();
+  expect(document.querySelector('[data-disk="2"]')).not.toBeNull();
+  vi.restoreAllMocks();
+});
+
+test("device refresh preserves heading focus after screen navigation", async () => {
+  click('[data-mode="burn"]');
+  await settle();
+  expect(document.activeElement).toBe(document.querySelector("h1"));
+});

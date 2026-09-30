@@ -112,9 +112,25 @@ export function nl(s: string): string {
 
 /** `total` 은 단계 수. 흐름마다 다르다. */
 export function icon(
-  name: "usb" | "copy" | "arrow" | "shield" | "sun" | "check",
+  name:
+    | "usb"
+    | "copy"
+    | "arrow"
+    | "shield"
+    | "sun"
+    | "moon"
+    | "monitor"
+    | "check"
+    | "download"
+    | "warning",
 ): string {
   const paths = {
+    moon: '<path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z"/>',
+    monitor:
+      '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/>',
+    download: '<path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>',
+    warning: '<path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v5m0 3v1"/>',
+
     usb: '<rect x="7" y="8" width="10" height="13" rx="3"/><path d="M9 8V3h6v5M10 4v2m4-2v2M10 17h4"/>',
     copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v13h5"/>',
     arrow: '<path d="M4 12h15m-6-6 6 6-6 6"/>',
@@ -126,7 +142,11 @@ export function icon(
   return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]}</svg>`;
 }
 
-export function segs(active: number, mode: "burn" | "clone" = "burn"): string {
+export function segs(
+  active: number,
+  mode: "burn" | "clone" = "burn",
+  finished = false,
+): string {
   const labels =
     mode === "clone"
       ? ["step_source", "step_target", "step_confirm", "step_run"]
@@ -134,8 +154,8 @@ export function segs(active: number, mode: "burn" | "clone" = "burn"): string {
   return `<ol class="steps" aria-label="${esc(t("stage_summary"))}">${labels
     .map(
       (label, i) =>
-        `<li class="seg${i + 1 <= active ? " on" : ""}" ${i + 1 === active ? 'aria-current="step"' : ""}>
-      <span class="step-num">${i + 1 < active ? icon("check") : i + 1}</span><span>${esc(t(label))}</span></li>`,
+        `<li class="seg${i + 1 <= active ? " on" : ""}" ${i + 1 === active && !finished ? 'aria-current="step"' : ""}>
+      <span class="step-num">${i + 1 < active || finished ? icon("check") : i + 1}</span><span>${esc(t(label))}</span></li>`,
     )
     .join("")}</ol>`;
 }
@@ -155,7 +175,7 @@ export function diskItem(
   return `<button class="item" data-disk="${d.number}" ${usable ? "" : "disabled"}
       aria-pressed="${selectedNumber === d.number}">
     <span class="device-icon">${icon("usb")}</span>
-    <span class="body"><span class="title">${esc(d.name)}</span><span class="sub">${esc(sub)}</span>
+    <span class="body"><span class="title">${esc(d.name)}</span><span class="device-state ${usable ? "available" : "unavailable"}">${esc(t(!usable ? "unavailable_status" : selectedNumber === d.number ? "selected_status" : source && !d.ready ? "read_only_status" : "available_status"))}</span><span class="sub">${esc(sub)}</span>
       ${usable ? "" : `<span class="sub warn">${esc(reasonText(d.blocked_reason ?? "", d.blocked_detail))}</span>`}</span>
     <span class="radio" aria-hidden="true">${icon("check")}</span></button>`;
 }

@@ -10,6 +10,23 @@ export type Lang = "ko" | "en";
 type Dict = Record<string, string>;
 
 const ko: Dict = {
+  hero_tag: "설치부터 복제까지",
+  hero_caption: "하나의 USB, 새로운 시작",
+  choice_label: "어떤 작업을 할까요?",
+  backup_label: "백업 먼저",
+  connected_label: "USB 저장장치",
+  selected_status: "선택됨",
+  available_status: "사용 가능",
+  unavailable_status: "선택 불가",
+  source_selected: "선택한 원본",
+  selected_target: "선택한 대상",
+  loader_official: "공식 릴리스에서 자동 다운로드",
+  confirm_reminder: "장치 이름과 용량을 확인한 뒤 삭제에 동의해 주세요.",
+  scan_failed_title: "USB 목록을 가져오지 못했습니다",
+  scan_failed_body: "연결 상태와 권한을 확인한 뒤 다시 시도해 주세요.",
+  theme_next: "테마: {0}. {1} 모드로 변경",
+  read_only_status: "읽기 전용",
+
   home_eyebrow: "XPENOLOGY USB WRITER",
   home_title: "부팅 USB 준비,\n한 곳에서 간편하게.",
   home_lead: "새 로더를 설치하거나, 사용 중인 부팅 USB를 복제하세요.",
@@ -214,6 +231,24 @@ const ko: Dict = {
 };
 
 const en: Dict = {
+  hero_tag: "CREATE · CLONE · READY",
+  hero_caption: "One drive. A fresh start.",
+  choice_label: "What would you like to do?",
+  backup_label: "Back up first",
+  connected_label: "USB STORAGE",
+  selected_status: "Selected",
+  available_status: "Available",
+  unavailable_status: "Unavailable",
+  source_selected: "Selected source",
+  selected_target: "Selected destination",
+  loader_official: "Downloaded from the official release",
+  confirm_reminder:
+    "Check the device name and capacity before accepting data deletion.",
+  scan_failed_title: "Could not load USB devices",
+  scan_failed_body: "Check the connection and permissions, then try again.",
+  theme_next: "Theme: {0}. Switch to {1} mode",
+  read_only_status: "Read only",
+
   home_eyebrow: "XPENOLOGY USB WRITER",
   home_title: "Your bootable USB.\nReady in a few steps.",
   home_lead: "Install a new loader or copy a USB drive that already works.",

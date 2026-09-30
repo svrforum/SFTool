@@ -154,3 +154,27 @@ jobs:
               Remove-Item $p -Force -ErrorAction SilentlyContinue
             }
           }
+
+
+  browser-ui:
+    name: Browser UI and accessibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: XpenologyUsb/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-ui-report
+          path: |
+            XpenologyUsb/playwright-report/
+            XpenologyUsb/test-results/
+          retention-days: 14
