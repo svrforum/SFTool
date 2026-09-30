@@ -113,6 +113,7 @@ type State = {
    * 있었고, 사용자가 할 수 있는 일은 USB 를 다시 꽂아보는 것뿐이었다.
    */
   diskNotes: string[];
+  scanError: string | null;
 };
 
 const state: State = {
@@ -154,6 +155,7 @@ const state: State = {
   eject: null,
   scanning: false,
   diskNotes: [],
+  scanError: null,
 };
 
 /** 굽기의 단계 순서. 검증은 선택이라 켰을 때만 들어간다. */
@@ -198,6 +200,7 @@ function loaderItem(
 ): string {
   return `
     <button class="item" data-loader="${id}" aria-pressed="${state.loader === id}">
+      <span class="loader-symbol">${id === "MShell" ? "m" : "R"}</span>
       <span class="body">
         <span class="title">${esc(name)}${
           badge ? `<span class="badge">${esc(t("recommended"))}</span>` : ""
@@ -221,6 +224,8 @@ function diskList(
          ${state.diskNotes.map((n) => `<div>${esc(n)}</div>`).join("")}
        </div>`
     : "";
+  if (state.scanError && !state.scanning)
+    return `<div class="empty scan-error" role="alert">${icon("warning")}<strong>${esc(t("scan_failed_title"))}</strong><p>${esc(t("scan_failed_body"))}</p><details><summary>${esc(t("error_details"))}</summary><pre>${esc(state.scanError)}</pre></details><button class="mini" data-refresh="1">${esc(t("empty_refresh"))}</button></div>`;
   if (state.loading || (state.scanning && disks.length === 0))
     return `<div class="empty" role="status"><span class="spinner"></span>${esc(t("loading_devices"))}</div>`;
   if (disks.length === 0)
@@ -235,7 +240,11 @@ function diskList(
 
 /** 시작 화면. 여기서만 갈래를 고를 수 있다. */
 function steps(active: number): string {
-  return segs(active, state.mode === "clone" ? "clone" : "burn");
+  return segs(
+    active,
+    state.mode === "clone" ? "clone" : "burn",
+    state.step === 5,
+  );
 }
 function targetDisk(): DiskEntry | undefined {
   return state.mode === "clone"
@@ -265,17 +274,27 @@ function cancelButton(): string {
 }
 
 function homeScreen(): string {
-  return `<main class="home"><div class="hero"><span class="eyebrow">${esc(t("home_eyebrow"))}</span>
-    <h1>${nl(t("home_title"))}</h1><p class="lead">${esc(t("home_lead"))}</p></div>
+  return `<main class="home">
+    <section class="hero"><div class="hero-copy"><span class="eyebrow">${esc(t("hero_tag"))}</span>
+      <h1>${nl(t("home_title"))}</h1><p class="lead">${esc(t("home_lead"))}</p>
+      <span class="hero-caption">${icon("shield")}${esc(t("hero_caption"))}</span></div>
+      <div class="usb-art" aria-hidden="true"><div class="usb-orbit orbit-one"></div><div class="usb-orbit orbit-two"></div><div class="usb-drive"><div class="usb-plug"><i></i><i></i></div><div class="usb-body">${icon("usb")}<span>USB</span><b></b></div></div><span class="art-spark spark-one"></span><span class="art-spark spark-two"></span></div>
+    </section>
+    <h2 class="section-label">${esc(t("choice_label"))}</h2>
     <div class="modes">
-      <button class="mode primary-mode" data-mode="burn"><span class="mode-ico">${icon("usb")}</span>
+      <button class="mode primary-mode" data-mode="burn"><span class="mode-top"><span class="mode-ico">${icon("download")}</span><span class="mode-index">01</span></span>
         <span class="mode-name">${esc(t("mode_burn_title"))}</span><span class="mode-sub">${esc(t("mode_burn_sub"))}</span>
         <span class="mode-action">${esc(t("home_burn_action"))}${icon("arrow")}</span></button>
-      <button class="mode" data-mode="clone"><span class="mode-ico">${icon("copy")}</span>
+      <button class="mode" data-mode="clone"><span class="mode-top"><span class="mode-ico">${icon("copy")}</span><span class="mode-index">02</span></span>
         <span class="mode-name">${esc(t("mode_clone_title"))}</span><span class="mode-sub">${esc(t("mode_clone_sub"))}</span>
         <span class="mode-action">${esc(t("home_clone_action"))}${icon("arrow")}</span></button>
-    </div><div class="preflight">${icon("shield")}<div><strong>${esc(t("home_ready"))}</strong><p>${esc(t("home_backup"))}</p>
-    <small>${esc(t("home_requirements"))}</small></div></div><p class="home-hint">${esc(t("home_hint"))}</p></main>`;
+    </div><aside class="preflight">${icon("shield")}<div><strong>${esc(t("backup_label"))}</strong><p>${esc(t("home_backup"))}</p>
+    <small>${esc(t("home_requirements"))}</small></div></aside><p class="home-hint">${esc(t("home_hint"))}</p></main>`;
+}
+
+function selectionStrip(disk: DiskEntry | undefined, label: string): string {
+  if (!disk) return "";
+  return `<div class="selection-strip">${icon("usb")}<div><small>${esc(label)}</small><strong>${esc(disk.name)}</strong><span>${esc(disk.size_label)} · ${esc(t("device_number", String(disk.number)))}</span></div></div>`;
 }
 
 /**
@@ -444,10 +463,11 @@ function burnScreen(): Screen {
         <div class="eyebrow">2 / 4</div>
         <h1>${nl(t("step2_title"))}</h1>
         <p class="lead">${esc(t("step2_lead"))}</p>
+        ${selectionStrip(selected(), t("selected_target"))}
         <div class="list">
           ${loaderItem("MShell", "m-shell", t("mshell_sub"), true)}
           ${loaderItem("Rr", "RR", t("rr_sub"), false)}
-        </div>
+        </div><p class="loader-note">${icon("download")}${esc(t("loader_official"))}</p>
       </main>`,
       foot: `<button class="ghost" data-go="1">${esc(t("back"))}</button>
              <button class="cta" data-go="3">${esc(t("next"))}</button>`,
@@ -458,7 +478,7 @@ function burnScreen(): Screen {
     return {
       body: `
       ${steps(3)}
-      <main>
+      <main class="confirm-screen">
         <div class="eyebrow">3 / 4</div>
         <h1 class="danger">${nl(t("step3_title"))}</h1>
         <p class="lead">${esc(t("step3_lead"))}</p>
@@ -471,7 +491,7 @@ function burnScreen(): Screen {
           }</div>
         </div>
         <div class="summary-row"><span>${esc(t("selected_loader"))}</span><strong>${state.loader === "MShell" ? "m-shell" : "RR"}</strong></div>
-        <div class="note"><span>ℹ</span><span>${esc(t("confirmation_note"))}</span></div>
+        <div class="note"><span>ℹ</span><span>${esc(t("confirm_reminder"))}</span></div>
         ${confirmationOptions()}
       </main>`,
       foot: `<button class="ghost" data-go="2">${esc(t("back"))}</button>
@@ -546,6 +566,10 @@ function cloneScreen(): Screen {
         <div class="eyebrow">2 / 4</div>
         <h1 class="danger">${nl(t("clone_pick_target"))}</h1>
         <p class="lead">${esc(t("clone_pick_target_hint"))}</p>
+        ${selectionStrip(
+          state.disks.find((d) => d.selection_id === state.sourceId),
+          t("source_selected"),
+        )}
         <div class="list">${diskList(choices, state.target)}</div>
       </main>`,
       foot: `<button class="ghost" data-back="1">${esc(t("back"))}</button>`,
@@ -560,7 +584,7 @@ function cloneScreen(): Screen {
     return {
       body: `
       ${steps(3)}
-      <main>
+      <main class="confirm-screen">
         <div class="eyebrow">3 / 4</div>
         <h1 class="danger">${nl(t("clone_confirm_title"))}</h1>
         <div class="clone-confirm">
@@ -653,7 +677,7 @@ function render() {
     ? `<div class="sim-banner">${esc(t("simulated"))}</div>`
     : "";
   const header = `<header class="app-header"><div class="brand"><span class="brand-icon">${icon("usb")}</span><div><strong>Xpenology USB</strong><small>${esc(t("app_subtitle"))}</small></div></div>
-    <div class="header-tools"><button class="theme-button" data-theme="1" aria-label="${esc(t("theme"))}">${icon("sun")}<span>${esc(t(`theme_${theme}`))}</span></button>
+    <div class="header-tools"><button class="theme-button" data-theme="1" aria-label="${esc(t("theme_next", t(`theme_${theme}`), t(`theme_${theme === "system" ? "light" : theme === "light" ? "dark" : "system"}`)))}" title="${esc(t(`theme_${theme}`))}">${icon(theme === "system" ? "monitor" : theme === "dark" ? "moon" : "sun")}<span>${esc(t(`theme_${theme}`))}</span></button>
     <div class="lang" role="group" aria-label="Language"><button data-lang="ko" aria-pressed="${getLang() === "ko"}">한국어</button><button data-lang="en" aria-pressed="${getLang() === "en"}">EN</button></div></div></header>`;
   const content =
     state.mode === "home"
@@ -664,13 +688,14 @@ function render() {
           return `${body}<footer>${foot}</footer>`;
         })();
   app.innerHTML = `${banner}${header}${content}`;
+  const title = app.querySelector<HTMLElement>("h1");
+  title?.setAttribute("tabindex", "-1");
   if (screen !== lastScreen) {
-    const title = app.querySelector<HTMLElement>("h1");
-    title?.setAttribute("tabindex", "-1");
     title?.focus({ preventScroll: true });
   } else {
     const main = app.querySelector("main");
     if (main) main.scrollTop = scroll;
+    if (focused?.tagName === "H1") title?.focus({ preventScroll: true });
     if (focusKey)
       Array.from(app.querySelectorAll<HTMLElement>(`[${focusKey}]`))
         .find((el) => el.getAttribute(focusKey) === focusValue)
@@ -704,7 +729,7 @@ function warnUnhandledActions() {
 
 app.addEventListener("click", (e) => {
   const el = (e.target as HTMLElement).closest<HTMLElement>(ACTION_SELECTOR);
-  if (!el || el.matches(":disabled")) return;
+  if (!el || !app.contains(el) || el.matches(":disabled")) return;
   if (el.dataset.theme) {
     theme =
       theme === "system" ? "light" : theme === "light" ? "dark" : "system";
@@ -1178,6 +1203,7 @@ async function refreshDisks(): Promise<void> {
     const next = listed.disks;
     state.disks = next;
     state.diskNotes = listed.notes;
+    state.scanError = null;
 
     // 고른 USB 가 사라졌으면 선택을 지운다. 남겨두면 "다음" 이 눌리는데
     // 대상이 없는 상태가 된다.
@@ -1213,7 +1239,8 @@ async function refreshDisks(): Promise<void> {
     // 열거가 실패한 것과 USB 가 없는 것은 다른 상황이고 할 일도 다르다.
     console.error("목록 갱신 실패", err);
     state.disks = [];
-    state.diskNotes = [cleanDetail(String(err))];
+    state.diskNotes = [];
+    state.scanError = cleanDetail(String(err));
   } finally {
     state.scanning = false;
     render();
@@ -1247,11 +1274,13 @@ async function boot() {
       const listed = await invoke<DiskList>("list_disks");
       state.disks = listed.disks;
       state.diskNotes = listed.notes;
+      state.scanError = null;
     }
-    // 선택 가능한 것이 하나뿐이면 미리 골라둔다. 흔한 경우라 클릭을 아낀다.
+    // 장치 선택은 사용자의 명시적인 조작으로만 바꾼다.
   } catch (err) {
     console.error("열거 실패", err);
-    state.diskNotes = [cleanDetail(String(err))];
+    state.diskNotes = [];
+    state.scanError = cleanDetail(String(err));
   } finally {
     state.loading = false;
     render();

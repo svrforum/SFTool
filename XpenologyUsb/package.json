@@ -9,13 +9,16 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "vitest run"
+    "test": "vitest run tests/",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@playwright/test": "^1.63.0",
     "@tauri-apps/cli": "^2",
     "jsdom": "^30.1.1",
     "typescript": "^7.0.2",
