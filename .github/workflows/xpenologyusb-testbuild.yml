@@ -8,9 +8,11 @@ name: XpenologyUsb Test Build
 # 악화시킨다. 여기서는 산출물을 아티팩트로만 올린다 — 받아서 시험하고, 통과한
 # 것만 태그를 찍어 릴리스한다.
 #
-# 실행: Actions 탭 → XpenologyUsb Test Build → Run workflow
+# 실행: Actions 탭 → Run workflow 또는 build/xpenologyusb-* 브랜치에 push
 
 on:
+  push:
+    branches: ['build/xpenologyusb-*']
   workflow_dispatch:
     inputs:
       note:
@@ -18,10 +20,14 @@ on:
         required: true
         default: 'candidate'
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build a test executable
     runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v7
@@ -41,6 +47,9 @@ jobs:
       - run: npm ci
         working-directory: XpenologyUsb
 
+      - run: npm test
+        working-directory: XpenologyUsb
+
       - run: npm run build
         working-directory: XpenologyUsb
 
@@ -57,12 +66,12 @@ jobs:
           mkdir -p out
           cp XpenologyUsb/src-tauri/target/release/xpenologyusb.exe out/XpenologyUsb-portable.exe
           cp XpenologyUsb/src-tauri/target/release/bundle/nsis/*-setup.exe out/
-          echo "--- SHA-256 ---"
-          (cd out && sha256sum *)
-          echo "커밋: ${GITHUB_SHA}"
+          (cd out && sha256sum *.exe > SHA256SUMS.txt)
+          cat out/SHA256SUMS.txt
+          printf 'Commit: %s\nBuild: %s/%s/actions/runs/%s\n' "$GITHUB_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > out/build-info.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: xpenologyusb-${{ inputs.note }}
+          name: xpenologyusb-${{ inputs.note || format('candidate-{0}', github.run_number) }}
           path: out/
           retention-days: 14
