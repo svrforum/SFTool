@@ -42,7 +42,7 @@ impl RawWriter for WindowsRawWriter {
         // 예전에는 드라이브 문자 제거와 파티션 테이블 삭제가 먼저 실행되고
         // 신원 확인은 그 뒤였다. 그래서 `IdentityChanged` 는 잘못된 장치를
         // **막은 것이 아니라 이미 망가뜨린 뒤 보고**하는 것이었다.
-        let (observed, sector_size) = {
+        let (observed, _sector_size) = {
             let probe = ioctl::open_physical_drive_for_query(disk.number)?;
 
             // 번호를 장치에서 직접 읽는다. 사용자가 고른 번호를 복사해 비교하면
@@ -145,7 +145,7 @@ impl RawWriter for WindowsRawWriter {
         let mut prep = Prep::new();
         let mut locked: Vec<OwnedHandle> = Vec::new();
 
-        match Self::prepare(disk, &observed, sector_size, &mut prep, &mut locked) {
+        match Self::prepare(disk, &observed, &mut prep, &mut locked) {
             Ok(session) => Ok(Box::new(session)),
             Err(e) => {
                 Self::recover(disk.number, &locked, &prep);
@@ -156,6 +156,36 @@ impl RawWriter for WindowsRawWriter {
 }
 
 impl WindowsRawWriter {
+    fn validate_handle(handle: &OwnedHandle, expected: &DiskInfo) -> Result<(), DeviceError> {
+        let desc = ioctl::query_device_descriptor(handle)?;
+        let mut actual = expected.clone();
+        actual.number = ioctl::query_device_number(handle)?;
+        actual.size_bytes = ioctl::query_length(handle)?;
+        actual.friendly_name = desc.friendly_name();
+        actual.serial = desc.serial;
+        actual.bus_type = BusType::from(desc.bus_type);
+        #[cfg(feature = "vhd-tests")]
+        {
+            actual.bus_type = expected.bus_type;
+        }
+        crate::core::safety::confirm_identity(expected, &actual).map_err(|e| {
+            DeviceError::IdentityChanged {
+                message: e.describe(),
+            }
+        })?;
+        if ioctl::protected_disk_numbers().contains(&actual.number) {
+            return Err(DeviceError::IdentityChanged {
+                message: "보호된 시스템 디스크입니다".into(),
+            });
+        }
+        if ioctl::is_write_protected(handle) {
+            return Err(DeviceError::WriteDenied {
+                op: "쓰기 금지 매체 확인",
+            });
+        }
+        Ok(())
+    }
+
     /// 되돌릴 수 없는 준비 단계.
     ///
     /// 순서는 Rufus 의 DD 경로를 그대로 따른다. 우리가 쓰던 순서는 정반대였고,
@@ -169,13 +199,13 @@ impl WindowsRawWriter {
     fn prepare(
         disk: &DiskInfo,
         observed: &DiskInfo,
-        sector_size: u32,
         prep: &mut Prep,
         locked: &mut Vec<OwnedHandle>,
     ) -> Result<WindowsSession, DeviceError> {
         // 2-1. 읽기 전용으로 열고 잠근 뒤, 그 상태에서 드라이브 문자를 뗀다.
         {
             let ro = ioctl::open_physical(disk.number, true, false)?;
+            Self::validate_handle(&ro, disk)?;
             for v in &disk.volumes {
                 if let Some(letter) = v.drive_letter {
                     // 되돌리는 코드가 없고 실패를 보고하지도 않는다. 표시라도 남겨야
@@ -194,6 +224,7 @@ impl WindowsRawWriter {
         // 여기서는 레이아웃만 지우고, 실제 내용은 곧 이미지가 덮는다.
         {
             let h = ioctl::open_physical(disk.number, false, true)?;
+            Self::validate_handle(&h, disk)?;
             // 다음 줄이 곧 되돌릴 수 없는 지점이다. 성공 여부와 무관하게
             // 표시한다 — 실패했더라도 지워졌는지 아닌지 확신할 수 없다.
             prep.reached(Touched::Layout);
@@ -208,6 +239,8 @@ impl WindowsRawWriter {
         // 2-3. 쓰기용 핸들. **잠금이 열기의 일부이고, 실패하면 여기서 끝난다.**
         //      잠기지 않은 물리 핸들로 쓰면 커널이 거부한다.
         let handle = ioctl::open_physical(disk.number, true, true)?;
+        Self::validate_handle(&handle, disk)?;
+        let sector_size = ioctl::query_sector_size(&handle)?;
 
         // 2-4. 파티션 테이블 자리를 실제로 0 으로 덮는다. **볼륨을 잠그기 전에.**
         //

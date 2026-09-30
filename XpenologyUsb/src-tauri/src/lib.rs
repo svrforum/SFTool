@@ -17,9 +17,10 @@ pub mod io_real;
 
 use core::loader::Loader;
 use core::runner::{self, Cancel, RunConfig};
+use core::selection::{self, Selections};
 use device::{RawWriter, UsbEnumerator};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
 /// 실행 환경에 맞는 열거자.
@@ -86,11 +87,36 @@ impl Cancel for Flag {
 #[derive(Default)]
 struct AppState {
     cancel: Arc<AtomicBool>,
+    busy: Arc<AtomicBool>,
+    selections: Mutex<Selections>,
 }
 
 #[tauri::command]
-fn list_disks() -> Result<commands::DiskList, String> {
-    commands::list_disks_with(enumerator().as_ref())
+fn list_disks(state: tauri::State<'_, AppState>) -> Result<commands::DiskList, String> {
+    let mut selections = state.selections.lock().map_err(|e| e.to_string())?;
+    commands::list_disks_register_with(enumerator().as_ref(), |d| selections.register(d))
+}
+
+struct OperationGuard(Arc<AtomicBool>);
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+impl AppState {
+    fn begin(&self) -> Result<OperationGuard, String> {
+        self.busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "이미 작업이 진행 중입니다".to_string())?;
+        self.cancel.store(false, Ordering::Relaxed);
+        Ok(OperationGuard(Arc::clone(&self.busy)))
+    }
+    fn selected(&self, id: &str) -> Result<core::model::DiskInfo, String> {
+        self.selections
+            .lock()
+            .map_err(|e| e.to_string())?
+            .selected(id)
+    }
 }
 
 /// 개발용 가짜 데이터로 실행 중인가. UI 에 배너를 띄우기 위한 것.
@@ -124,16 +150,16 @@ fn eject_disk(disk_number: u32) -> Result<(), String> {
 /// 대상은 건드리지 않는다. 확인 화면이 "복사할 양 4.98 GB" 를 보여주려면
 /// 복제를 시작하기 **전에** 이 값이 필요하다.
 #[tauri::command]
-fn analyze_source(disk_number: u32) -> Result<commands::SourcePlan, String> {
+fn analyze_source(
+    state: tauri::State<'_, AppState>,
+    selection_id: String,
+) -> Result<commands::SourcePlan, String> {
     let enumerator = enumerator();
     let protected = enumerator
         .protected_disk_numbers()
         .map_err(|e| format!("{e:?}"))?;
     let disks = enumerator.list_disks().map_err(|e| format!("{e:?}"))?;
-    let disk = disks
-        .into_iter()
-        .find(|d| d.number == disk_number)
-        .ok_or_else(|| "선택한 USB를 찾을 수 없습니다".to_string())?;
+    let disk = selection::resolve(&state.selected(&selection_id)?, &disks)?;
 
     core::cloner::analyze(reader().as_ref(), &disk, &protected)
         .map(commands::SourcePlan::from)
@@ -145,31 +171,25 @@ fn analyze_source(disk_number: u32) -> Result<commands::SourcePlan, String> {
 async fn clone_disk(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    source: u32,
-    target: u32,
+    source: String,
+    target: String,
     verify: bool,
 ) -> Result<core::cloner::CloneSummary, String> {
-    state.cancel.store(false, Ordering::Relaxed);
+    let operation = state.begin()?;
+    let selected_source = state.selected(&source)?;
+    let selected_target = state.selected(&target)?;
     let cancel = Arc::clone(&state.cancel);
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
         let enumerator = enumerator();
         let protected = enumerator
             .protected_disk_numbers()
             .map_err(|e| format!("{e:?}"))?;
         let disks = enumerator.list_disks().map_err(|e| format!("{e:?}"))?;
 
-        // 번호로 지금 상태에서 다시 조회한다. 프런트엔드가 보낸 정보를
-        // 신뢰하지 않는다 — 목록을 만든 뒤 장치가 바뀌었을 수 있다.
-        let find = |n: u32| {
-            disks
-                .iter()
-                .find(|d| d.number == n)
-                .cloned()
-                .ok_or_else(|| format!("USB {n} 를 찾을 수 없습니다"))
-        };
-        let src = find(source)?;
-        let dst = find(target)?;
+        let src = selection::resolve(&selected_source, &disks)?;
+        let dst = selection::resolve(&selected_target, &disks)?;
 
         core::cloner::run(
             core::cloner::CloneConfig { verify },
@@ -202,7 +222,7 @@ fn cancel_write(state: tauri::State<'_, AppState>) {
 async fn write_image(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    disk_number: u32,
+    selection_id: String,
     loader: String,
     verify: bool,
 ) -> Result<core::runner::RunSummary, String> {
@@ -212,23 +232,19 @@ async fn write_image(
         other => return Err(format!("알 수 없는 로더: {other}")),
     };
 
-    // 새 작업이므로 이전 취소 신호를 지운다.
-    state.cancel.store(false, Ordering::Relaxed);
+    let operation = state.begin()?;
+    let selected = state.selected(&selection_id)?;
     let cancel = Arc::clone(&state.cancel);
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
         let enumerator = enumerator();
         let protected = enumerator
             .protected_disk_numbers()
             .map_err(|e| format!("{e:?}"))?;
         let disks = enumerator.list_disks().map_err(|e| format!("{e:?}"))?;
 
-        // 번호로 다시 찾는다. 목록을 만든 뒤 장치가 바뀌었을 수 있으므로
-        // 프런트엔드가 보낸 정보를 신뢰하지 않고 지금 상태에서 조회한다.
-        let disk = disks
-            .into_iter()
-            .find(|d| d.number == disk_number)
-            .ok_or_else(|| "선택한 USB를 찾을 수 없습니다".to_string())?;
+        let disk = selection::resolve(&selected, &disks)?;
 
         let io = io_real::RealIo::new()?;
         let w = writer();
@@ -270,4 +286,20 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    #[test]
+    fn concurrent_jobs_cannot_reset_cancellation() {
+        let state = AppState::default();
+        let first = state.begin().unwrap();
+        state.cancel.store(true, Ordering::Relaxed);
+        assert!(state.begin().is_err());
+        assert!(state.cancel.load(Ordering::Relaxed));
+        drop(first);
+        let _second = state.begin().unwrap();
+        assert!(!state.cancel.load(Ordering::Relaxed));
+    }
 }

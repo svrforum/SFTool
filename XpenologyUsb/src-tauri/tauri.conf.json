@@ -14,8 +14,8 @@
     "windows": [
       {
         "title": "Xpenology USB",
-        "width": 480,
-        "height": 720,
+        "width": 680,
+        "height": 820,
         "minWidth": 420,
         "minHeight": 620,
         "resizable": true,

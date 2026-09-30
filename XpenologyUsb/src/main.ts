@@ -10,13 +10,14 @@
  * 흐려지는 순간 사용자는 멀쩡한 USB 를 잃는다.
  */
 
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import { t, getLang, setLang, type Lang } from './i18n';
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { t, getLang, setLang, type Lang } from "./i18n";
 import {
   ACTION_SELECTOR,
   ACTIONS,
   diskItem,
+  icon,
   ejectBlock,
   esc,
   fmtBytes,
@@ -30,14 +31,14 @@ import {
   type Failure,
   type ProgressEvent,
   type Stage,
-} from './ui';
-import './styles.css';
+} from "./ui";
+import "./styles.css";
 
-type LoaderId = 'MShell' | 'Rr';
+type LoaderId = "MShell" | "Rr";
 type Step = 1 | 2 | 3 | 4 | 5 | 6;
 
 /** 시작 화면에서 고르는 갈래. */
-type Mode = 'home' | 'burn' | 'clone';
+type Mode = "home" | "burn" | "clone";
 
 /**
  * 진행 화면에 나오는 단계 이름.
@@ -45,7 +46,7 @@ type Mode = 'home' | 'burn' | 'clone';
  * 복제에는 굽기에 없는 `Analyzing` 이 있다. 두 흐름이 같은 진행 화면을 쓰므로
  * 여기서 합쳐 둔다.
  */
-type FlowStage = Stage | 'Analyzing';
+type FlowStage = Stage | "Analyzing";
 
 /** 한 화면. 껍데기(배너·언어 전환·footer)는 `render` 가 붙인다. */
 type Screen = { body: string; foot: string };
@@ -79,6 +80,9 @@ type State = {
   step: Step;
   disks: DiskEntry[];
   selectedDisk: number | null;
+  selectionId: string | null;
+  sourceId: string | null;
+  targetId: string | null;
   /** 복제 원본 디스크 번호. */
   source: number | null;
   /** 복제 대상 디스크 번호. */
@@ -87,6 +91,10 @@ type State = {
   plan: SourcePlan | null;
   loader: LoaderId;
   verify: boolean;
+  acknowledged: boolean;
+  canceling: boolean;
+  cancelError: boolean;
+  copied: boolean;
   simulated: boolean;
   loading: boolean;
   progress: ProgressEvent | null;
@@ -94,7 +102,7 @@ type State = {
   summary: RunSummary | null;
   cloneSummary: CloneSummary | null;
   /** 안전 제거 상태. null 이면 아직 누르지 않은 것. */
-  eject: 'busy' | 'ok' | 'fail' | null;
+  eject: "busy" | "ok" | "fail" | null;
   /** 목록을 다시 읽는 중인가. */
   scanning: boolean;
   /**
@@ -108,14 +116,17 @@ type State = {
 };
 
 const state: State = {
-  mode: 'home',
+  mode: "home",
   step: 1,
   disks: [],
   selectedDisk: null,
+  selectionId: null,
+  sourceId: null,
+  targetId: null,
   source: null,
   target: null,
   plan: null,
-  loader: 'MShell',
+  loader: "MShell",
   // 기본으로 끈다. 기능이 미덥지 않아서가 아니라 **백신 때문**이다.
   //
   // 검증을 켜면 파티션 테이블을 쓰기 전에 디스크 전체를 되읽어야 한다. 그러면
@@ -130,6 +141,10 @@ const state: State = {
   // 그래서 판단이 필요한 쪽을 사용자에게 넘긴다. 끈 상태의 순서는 0.4.2 와
   // 같으므로 기본 경로는 잡히지 않는다.
   verify: false,
+  acknowledged: false,
+  canceling: false,
+  cancelError: false,
+  copied: false,
   simulated: false,
   loading: true,
   progress: null,
@@ -144,88 +159,123 @@ const state: State = {
 /** 굽기의 단계 순서. 검증은 선택이라 켰을 때만 들어간다. */
 function plannedStages(): FlowStage[] {
   const s: FlowStage[] = [
-    'Resolving',
-    'Downloading',
-    'Extracting',
-    'Preparing',
-    'Writing',
+    "Resolving",
+    "Downloading",
+    "Extracting",
+    "Preparing",
+    "Writing",
   ];
-  if (state.verify) s.push('Verifying');
-  s.push('Finishing');
+  if (state.verify) s.push("Verifying");
+  s.push("Finishing");
   return s;
 }
 
 /** 복제의 단계 순서. 내려받기와 압축 해제가 없고, 대신 원본 분석이 있다. */
 function cloneStages(): FlowStage[] {
-  const s: FlowStage[] = ['Analyzing', 'Preparing', 'Writing'];
-  if (state.verify) s.push('Verifying');
-  s.push('Finishing');
+  const s: FlowStage[] = ["Analyzing", "Preparing", "Writing"];
+  if (state.verify) s.push("Verifying");
+  s.push("Finishing");
   return s;
 }
 
-const app = document.querySelector<HTMLDivElement>('#app')!;
+const app = document.querySelector<HTMLDivElement>("#app")!;
 
 /** 선택된 디스크. 목록이 갱신되며 사라졌을 수 있으므로 매번 조회한다. */
 function selected(): DiskEntry | undefined {
-  return state.disks.find((d) => d.number === state.selectedDisk);
+  return state.disks.find((d) => d.selection_id === state.selectionId);
 }
 
 /** 지금 흐름에서 안전 제거의 대상. 복제는 갓 만들어진 대상 USB 다. */
 function ejectTarget(): number | null {
-  return state.mode === 'clone' ? state.target : state.selectedDisk;
+  return state.mode === "clone" ? state.target : state.selectedDisk;
 }
 
-function loaderItem(id: LoaderId, name: string, sub: string, badge: boolean): string {
+function loaderItem(
+  id: LoaderId,
+  name: string,
+  sub: string,
+  badge: boolean,
+): string {
   return `
-    <button class="item" data-loader="${id}" aria-selected="${state.loader === id}">
+    <button class="item" data-loader="${id}" aria-pressed="${state.loader === id}">
       <span class="body">
-        <span class="title">${badge ? '⭐ ' : ''}${esc(name)}${
-          badge ? `<span class="badge">${esc(t('recommended'))}</span>` : ''
+        <span class="title">${esc(name)}${
+          badge ? `<span class="badge">${esc(t("recommended"))}</span>` : ""
         }</span>
         <span class="sub">${esc(sub)}</span>
       </span>
-      <span class="radio"></span>
+      <span class="radio" aria-hidden="true">${icon("check")}</span>
     </button>`;
 }
 
 /** 디스크 목록. 비어 있으면 "꽂으면 나타납니다" 안내로 바꾼다. */
-function diskList(disks: DiskEntry[], selectedNumber: number | null): string {
+function diskList(
+  disks: DiskEntry[],
+  selectedNumber: number | null,
+  source = false,
+): string {
   // 빠진 장치의 사유는 목록이 비었든 아니든 보여준다. 하나만 빠진 경우가
   // 오히려 알기 어렵다 — 목록에 다른 것이 있으니 아무 문제가 없어 보인다.
   const notes = state.diskNotes.length
-    ? `<div class="hint scan-notes">${esc(t('step1_skipped'))}
-         ${state.diskNotes.map((n) => `<div>${esc(n)}</div>`).join('')}
+    ? `<div class="hint scan-notes">${esc(t("step1_skipped"))}
+         ${state.diskNotes.map((n) => `<div>${esc(n)}</div>`).join("")}
        </div>`
-    : '';
-  if (disks.length === 0) {
-    return `<div class="empty">${esc(t('step1_empty'))}
-              <div class="hint">${esc(t('step1_empty_hint'))}</div>
-              ${notes}
-            </div>`;
-  }
-  return disks.map((d) => diskItem(d, selectedNumber)).join('') + notes;
+    : "";
+  if (state.loading || (state.scanning && disks.length === 0))
+    return `<div class="empty" role="status"><span class="spinner"></span>${esc(t("loading_devices"))}</div>`;
+  if (disks.length === 0)
+    return `<div class="empty">${icon("usb")}<strong>${esc(t("empty_title"))}</strong><p>${esc(t("empty_body"))}</p>
+    <button class="mini" data-refresh="1">${esc(t("empty_refresh"))}</button>${notes}</div>`;
+  return (
+    `<div class="list-meta"><span>${esc(t("ready_count", String(disks.filter((d) => d.ready || (source && ["read_only", "too_small_for_any_image"].includes(d.blocked_reason ?? ""))).length)))}</span><span>${esc(t("scan_auto"))}</span></div>` +
+    disks.map((d) => diskItem(d, selectedNumber, source)).join("") +
+    notes
+  );
 }
 
 /** 시작 화면. 여기서만 갈래를 고를 수 있다. */
+function steps(active: number): string {
+  return segs(active, state.mode === "clone" ? "clone" : "burn");
+}
+function targetDisk(): DiskEntry | undefined {
+  return state.mode === "clone"
+    ? state.disks.find((d) => d.selection_id === state.targetId)
+    : selected();
+}
+function canStart(): boolean {
+  const disk = targetDisk();
+  return (
+    state.acknowledged &&
+    !!disk?.ready &&
+    (state.mode !== "clone" ||
+      (!!state.plan &&
+        state.plan.bytes <= disk.size_bytes &&
+        state.sourceId !== state.targetId))
+  );
+}
+function confirmationOptions(): string {
+  return `<div class="verify-option"><label class="check"><input type="checkbox" data-verify="1" ${state.verify ? "checked" : ""}>
+    <span><strong>${esc(t("verify_title"))}</strong><small>${esc(t("verify_hint"))}</small></span></label></div>
+    <label class="check acknowledgement"><input type="checkbox" data-ack="1" ${state.acknowledged ? "checked" : ""}>
+    <span>${esc(t("erase_ack"))}</span></label>`;
+}
+function cancelButton(): string {
+  return `<span class="cancel-note" role="status">${state.cancelError ? esc(t("cancel_failed")) : state.canceling ? esc(t("cancel_hint")) : ""}</span>
+  <button class="ghost" data-cancel="1" ${state.canceling ? "disabled" : ""}>${esc(t(state.canceling ? "canceling" : "cancel"))}</button>`;
+}
+
 function homeScreen(): string {
-  return `
-    <main class="home">
-      <div class="center">
-        <h1>${nl(t('app_title'))}</h1>
-        <div class="modes">
-          <button class="mode" data-mode="burn">
-            <span class="mode-ico">💾</span>
-            <span class="mode-name">${esc(t('mode_burn_title'))}</span>
-            <span class="mode-sub">${esc(t('mode_burn_sub'))}</span>
-          </button>
-          <button class="mode" data-mode="clone">
-            <span class="mode-ico">⧉</span>
-            <span class="mode-name">${esc(t('mode_clone_title'))}</span>
-            <span class="mode-sub">${esc(t('mode_clone_sub'))}</span>
-          </button>
-        </div>
-      </div>
-    </main>`;
+  return `<main class="home"><div class="hero"><span class="eyebrow">${esc(t("home_eyebrow"))}</span>
+    <h1>${nl(t("home_title"))}</h1><p class="lead">${esc(t("home_lead"))}</p></div>
+    <div class="modes">
+      <button class="mode primary-mode" data-mode="burn"><span class="mode-ico">${icon("usb")}</span>
+        <span class="mode-name">${esc(t("mode_burn_title"))}</span><span class="mode-sub">${esc(t("mode_burn_sub"))}</span>
+        <span class="mode-action">${esc(t("home_burn_action"))}${icon("arrow")}</span></button>
+      <button class="mode" data-mode="clone"><span class="mode-ico">${icon("copy")}</span>
+        <span class="mode-name">${esc(t("mode_clone_title"))}</span><span class="mode-sub">${esc(t("mode_clone_sub"))}</span>
+        <span class="mode-action">${esc(t("home_clone_action"))}${icon("arrow")}</span></button>
+    </div><div class="preflight">${icon("shield")}<div><strong>${esc(t("home_ready"))}</strong><p>${esc(t("home_backup"))}</p>
+    <small>${esc(t("home_requirements"))}</small></div></div><p class="home-hint">${esc(t("home_hint"))}</p></main>`;
 }
 
 /**
@@ -242,56 +292,57 @@ function progressScreen(stages: FlowStage[]): string {
     .map((s) => {
       const done = completed.includes(s);
       const active = p?.stage === s;
-      const mark = done ? '✓' : active ? '›' : '·';
+      const mark = done ? "✓" : active ? "›" : "·";
       // 진행 중인 단계에만 속도나 부가 정보를 붙인다.
-      let extra = '';
+      let extra = "";
       if (active && p) {
         // 오래 걸리는 단계에는 속도를 붙인다. 몇 분씩 걸리는 쓰기 단계에
         // 아무 숫자도 없으면 멈춘 것처럼 보인다.
         const timed =
-          p.stage === 'Downloading' ||
-          p.stage === 'Writing' ||
-          p.stage === 'Verifying';
+          p.stage === "Downloading" ||
+          p.stage === "Writing" ||
+          p.stage === "Verifying";
         if (timed && p.bytes_per_sec) {
-          extra = t('speed', fmtBytes(p.bytes_per_sec));
+          extra = t("speed", fmtBytes(p.bytes_per_sec));
         } else if (p.detail) {
           extra = p.detail;
         }
       }
-      return `<div class="stage${done ? ' done' : ''}${active ? ' active' : ''}">
+      return `<div class="stage${done ? " done" : ""}${active ? " active" : ""}">
           <span class="mark">${mark}</span>
           <span>${esc(t(`stage_${s}`))}</span>
-          ${extra ? `<span class="extra">${esc(extra)}</span>` : ''}
+          ${extra ? `<span class="extra">${esc(extra)}</span>` : ""}
         </div>`;
     })
-    .join('');
+    .join("");
 
   // 총량을 모르면 불확정 막대로 바꾼다. 0% 에 멈춘 막대는
   // 멈춘 것처럼 보여서 사용자가 창을 닫는다.
   const indeterminate = p == null || p.percent == null;
   const width = p?.percent ?? 0;
   const bar = `
-    <div class="bar${indeterminate ? ' indeterminate' : ''}">
-      <i style="width:${indeterminate ? '' : `${width}%`}"></i>
+    <div class="bar${indeterminate ? " indeterminate" : ""}" role="progressbar" aria-label="${esc(t("progress_phase"))}" aria-valuemin="0" aria-valuemax="100" ${indeterminate ? "" : `aria-valuenow="${width}"`}>
+      <i style="width:${indeterminate ? "" : `${width}%`}"></i>
     </div>
     <div class="bar-meta">
-      <span class="pct">${indeterminate ? '' : `${width}%`}</span>
+      <span class="pct">${indeterminate ? esc(t("progress_unknown")) : `${width}%`}</span>
       <span>${
         p && p.total_bytes
-          ? esc(t('of_total', fmtBytes(p.done_bytes), fmtBytes(p.total_bytes)))
-          : ''
+          ? esc(t("of_total", fmtBytes(p.done_bytes), fmtBytes(p.total_bytes)))
+          : ""
       }</span>
-      <span>${p?.eta_secs != null ? esc(fmtEta(p.eta_secs)) : ''}</span>
+      <span>${p?.eta_secs != null ? esc(fmtEta(p.eta_secs)) : ""}</span>
     </div>`;
 
   return `
-    ${segs(4)}
+    ${steps(4)}
     <main>
       <div class="eyebrow">4 / 4</div>
-      <h1>${nl(t('step4_title'))}</h1>
-      <p class="lead">${esc(t('step4_lead'))}</p>
-      <div class="stages">${list}</div>
-      ${bar}
+      <h1>${nl(t("step4_title"))}</h1>
+      <p class="lead">${esc(t("step4_lead"))}</p>
+      <div class="progress-destination">${icon("usb")}<div><small>${esc(t("progress_target"))}</small><strong>${esc(targetDisk()?.name ?? "")}</strong><span>${esc(targetDisk()?.size_label ?? "")}</span></div></div>
+      <div class="progress-status" role="status" aria-live="polite">${esc(t(`stage_${p?.stage ?? (state.mode === "clone" ? "Analyzing" : "Resolving")}`))}</div>
+      ${bar}<div class="stages">${list}</div>
     </main>`;
 }
 
@@ -311,20 +362,20 @@ function doneScreen(
   diskNumber: number | null,
 ): string {
   return `
-    ${segs(4)}
+    ${steps(4)}
     <main>
       <div class="center">
         <div class="tick">✓</div>
         <h1>${nl(title)}</h1>
         <p class="lead">${esc(sub)}</p>
         ${extra}
-        ${diskNumber == null ? '' : ejectBlock(state.eject)}
+        ${diskNumber == null ? "" : ejectBlock(state.eject)}
       </div>
       <div class="note explain">
         <span>ℹ</span>
-        <span><b>${esc(t('done_explorer_title'))}</b><br>${esc(
-          t('done_explorer_body'),
-        )}<br><span class="dim">${esc(t('done_replug'))}</span></span>
+        <span><b>${esc(t("done_explorer_title"))}</b><br>${esc(
+          t("done_explorer_body"),
+        )}<br><span class="dim">${esc(t("done_replug"))}</span></span>
       </div>
     </main>`;
 }
@@ -332,20 +383,32 @@ function doneScreen(
 /** 실패 화면. 원인마다 다음에 뭘 해야 하는지 함께 알려준다. */
 function errorScreen(): string {
   const f = state.failure;
-  const code = f?.code ?? 'generic';
-  const what = t(`err_${code}`) === `err_${code}` ? t('error_title') : t(`err_${code}`);
+  const code = f?.code ?? "generic";
+  const what =
+    code === "canceled"
+      ? t("cancel_title")
+      : t(`err_${code}`) === `err_${code}`
+        ? t("error_title")
+        : t(`err_${code}`);
   const why =
-    t(`err_${code}_why`) === `err_${code}_why`
-      ? t('err_generic_why')
-      : t(`err_${code}_why`);
+    code === "canceled"
+      ? t("cancel_body")
+      : t(`err_${code}_why`) === `err_${code}_why`
+        ? t("err_generic_why")
+        : t(`err_${code}_why`);
   return `
-    ${segs(4)}
+    ${steps(4)}
     <main>
-      <h1 class="danger">${nl(t('error_title'))}</h1>
+      <h1 class="${code === "canceled" ? "" : "danger"}">${nl(t(code === "canceled" ? "cancel_title" : "error_title"))}</h1>
       <div class="error-box">
         <div class="what">${esc(what)}</div>
         <div class="why">${esc(why)}</div>
-        ${f?.detail ? `<div class="why">${esc(f.detail)}</div>` : ''}
+        ${
+          f?.detail
+            ? `<details class="error-detail" open><summary>${esc(t("error_details"))}</summary><pre>${esc(f.detail)}</pre></details>
+          <button class="mini" data-copy-error="1">${esc(t(state.copied ? "copied" : "copy_error"))}</button>`
+            : ""
+        }
       </div>
     </main>`;
 }
@@ -355,65 +418,65 @@ function burnScreen(): Screen {
   if (state.step === 1) {
     return {
       body: `
-      ${segs(1)}
+      ${steps(1)}
       <main>
         <div class="eyebrow">1 / 4</div>
         <div class="row-head">
-          <h1>${nl(t('step1_title'))}</h1>
+          <h1>${nl(t("step1_title"))}</h1>
           <button class="refresh" data-refresh="1" ${
-            state.scanning ? 'disabled' : ''
-          } title="${esc(t('refresh'))}">${state.scanning ? '⋯' : '↻'}</button>
+            state.scanning ? "disabled" : ""
+          } title="${esc(t("refresh"))}">${state.scanning ? "⋯" : "↻"}</button>
         </div>
-        <p class="lead">${esc(t('step1_lead'))}</p>
+        <p class="lead">${esc(t("step1_lead"))}</p>
         <div class="list">${diskList(state.disks, state.selectedDisk)}</div>
       </main>`,
-      foot: `<button class="ghost" data-back="1">${esc(t('back'))}</button>
+      foot: `<button class="ghost" data-back="1">${esc(t("back"))}</button>
              <button class="cta" data-go="2" ${
-               selected()?.ready ? '' : 'disabled'
-             }>${esc(t('next'))}</button>`,
+               selected()?.ready ? "" : "disabled"
+             }>${esc(t("next"))}</button>`,
     };
   }
   if (state.step === 2) {
     return {
       body: `
-      ${segs(2)}
+      ${steps(2)}
       <main>
         <div class="eyebrow">2 / 4</div>
-        <h1>${nl(t('step2_title'))}</h1>
-        <p class="lead">${esc(t('step2_lead'))}</p>
+        <h1>${nl(t("step2_title"))}</h1>
+        <p class="lead">${esc(t("step2_lead"))}</p>
         <div class="list">
-          ${loaderItem('MShell', 'm-shell', t('mshell_sub'), true)}
-          ${loaderItem('Rr', 'RR', t('rr_sub'), false)}
+          ${loaderItem("MShell", "m-shell", t("mshell_sub"), true)}
+          ${loaderItem("Rr", "RR", t("rr_sub"), false)}
         </div>
       </main>`,
-      foot: `<button class="ghost" data-go="1">${esc(t('back'))}</button>
-             <button class="cta" data-go="3">${esc(t('next'))}</button>`,
+      foot: `<button class="ghost" data-go="1">${esc(t("back"))}</button>
+             <button class="cta" data-go="3">${esc(t("next"))}</button>`,
     };
   }
   if (state.step === 3) {
     const d = selected();
     return {
       body: `
-      ${segs(3)}
+      ${steps(3)}
       <main>
         <div class="eyebrow">3 / 4</div>
-        <h1 class="danger">${nl(t('step3_title'))}</h1>
-        <p class="lead">${esc(t('step3_lead'))}</p>
+        <h1 class="danger">${nl(t("step3_title"))}</h1>
+        <p class="lead">${esc(t("step3_lead"))}</p>
         <div class="target">
-          <div class="name">${esc(d?.name ?? '')}</div>
-          <div class="meta">${esc(d?.size_label ?? '')}${
-            d?.drive_letters.length ? ` · ${esc(d.drive_letters.join(' '))}` : ''
+          <span class="target-label">${esc(t("progress_target"))}</span><div class="name">${esc(d?.name ?? "")}</div>
+          <div class="meta">${esc(d?.size_label ?? "")}${
+            d?.drive_letters.length
+              ? ` · ${esc(d.drive_letters.join(" "))}`
+              : ""
           }</div>
         </div>
-        <div class="note"><span>ℹ</span><span>${esc(t('step3_note'))}</span></div>
-        <label class="check">
-          <input type="checkbox" data-verify="1" ${state.verify ? 'checked' : ''}>
-          <span>${esc(t('verify_label'))}</span>
-        </label>
+        <div class="summary-row"><span>${esc(t("selected_loader"))}</span><strong>${state.loader === "MShell" ? "m-shell" : "RR"}</strong></div>
+        <div class="note"><span>ℹ</span><span>${esc(t("confirmation_note"))}</span></div>
+        ${confirmationOptions()}
       </main>`,
-      foot: `<button class="ghost" data-go="2">${esc(t('back'))}</button>
-             <button class="cta danger" data-go="4">${esc(
-               t('erase_and_write'),
+      foot: `<button class="ghost" data-go="2">${esc(t("back"))}</button>
+             <button class="cta danger" data-go="4" ${canStart() ? "" : "disabled"}>${esc(
+               t("erase_and_write"),
              )}</button>`,
     };
   }
@@ -422,34 +485,34 @@ function burnScreen(): Screen {
     // 쓰기가 계속 도는데 화면만 3단계로 가면 사용자가 USB 를 뽑는다.
     return {
       body: progressScreen(plannedStages()),
-      foot: `<button class="ghost" data-cancel="1">${esc(t('cancel'))}</button>`,
+      foot: cancelButton(),
     };
   }
   if (state.step === 6) {
     return {
       body: errorScreen(),
-      foot: `<button class="ghost" data-go="1">${esc(t('back'))}</button>
-             <button class="cta" data-go="3">${esc(t('retry'))}</button>`,
+      foot: `<button class="ghost" data-go="1">${esc(t("back"))}</button>
+             <button class="cta" data-mode="burn">${esc(t("retry_select"))}</button>`,
     };
   }
 
   const sm = state.summary;
   const written = sm
     ? `<div class="written">${esc(
-        t('done_written', sm.loader, sm.tag, fmtBytes(sm.bytes_written)),
+        t("done_written", sm.loader, sm.tag, fmtBytes(sm.bytes_written)),
       )}</div>`
-    : '';
+    : "";
   const verified = sm?.verified
-    ? `<div class="written ok">✓ ${esc(t('done_verified'))}</div>`
-    : '';
+    ? `<div class="written ok">✓ ${esc(t("done_verified"))}</div>`
+    : `<div class="written">${esc(t("not_verified"))}</div>`;
   return {
     body: doneScreen(
-      t('done_title'),
-      t('done_lead'),
+      t("done_title"),
+      t("done_lead"),
       `${written}${verified}`,
       state.selectedDisk,
     ),
-    foot: `<button class="cta" data-mode="home">${esc(t('done'))}</button>`,
+    foot: `<button class="cta" data-mode="home">${esc(t("new_task"))}</button>`,
   };
 }
 
@@ -458,19 +521,19 @@ function cloneScreen(): Screen {
   if (state.step === 1) {
     return {
       body: `
-      ${segs(1)}
+      ${steps(1)}
       <main>
         <div class="eyebrow">1 / 4</div>
         <div class="row-head">
-          <h1>${nl(t('clone_pick_source'))}</h1>
+          <h1>${nl(t("clone_pick_source"))}</h1>
           <button class="refresh" data-refresh="1" ${
-            state.scanning ? 'disabled' : ''
-          } title="${esc(t('refresh'))}">${state.scanning ? '⋯' : '↻'}</button>
+            state.scanning ? "disabled" : ""
+          } title="${esc(t("refresh"))}">${state.scanning ? "⋯" : "↻"}</button>
         </div>
-        <p class="lead">${esc(t('clone_pick_source_hint'))}</p>
-        <div class="list">${diskList(state.disks, state.source)}</div>
+        <p class="lead">${esc(t("clone_pick_source_hint"))}</p>
+        <div class="list">${diskList(state.disks, state.source, true)}</div>
       </main>`,
-      foot: `<button class="ghost" data-back="1">${esc(t('back'))}</button>`,
+      foot: `<button class="ghost" data-back="1">${esc(t("back"))}</button>`,
     };
   }
   if (state.step === 2) {
@@ -478,14 +541,14 @@ function cloneScreen(): Screen {
     const choices = state.disks.filter((d) => d.number !== state.source);
     return {
       body: `
-      ${segs(2)}
+      ${steps(2)}
       <main>
         <div class="eyebrow">2 / 4</div>
-        <h1 class="danger">${nl(t('clone_pick_target'))}</h1>
-        <p class="lead">${esc(t('clone_pick_target_hint'))}</p>
+        <h1 class="danger">${nl(t("clone_pick_target"))}</h1>
+        <p class="lead">${esc(t("clone_pick_target_hint"))}</p>
         <div class="list">${diskList(choices, state.target)}</div>
       </main>`,
-      foot: `<button class="ghost" data-back="1">${esc(t('back'))}</button>`,
+      foot: `<button class="ghost" data-back="1">${esc(t("back"))}</button>`,
     };
   }
   if (state.step === 3) {
@@ -496,47 +559,45 @@ function cloneScreen(): Screen {
     const plan = state.plan;
     return {
       body: `
-      ${segs(3)}
+      ${steps(3)}
       <main>
         <div class="eyebrow">3 / 4</div>
-        <h1 class="danger">${nl(t('clone_confirm_title'))}</h1>
+        <h1 class="danger">${nl(t("clone_confirm_title"))}</h1>
         <div class="clone-confirm">
           <div class="side">
-            <span class="side-label">${esc(t('clone_source'))}</span>
-            <strong>${esc(src?.name ?? '')}</strong>
+            <span class="side-label">${esc(t("clone_source"))}</span>
+            <strong>${esc(src?.name ?? "")}</strong><span class="side-note">${esc(src?.size_label ?? "")} · ${esc(src?.drive_letters.join(" ") || t("no_letter"))}</span>
             <span class="side-note">${
               plan
                 ? `${esc(plan.scheme)} · ${esc(
-                    t('clone_partitions', String(plan.partitions)),
+                    t("clone_partitions", String(plan.partitions)),
                   )}`
-                : esc(t('clone_analyzing'))
+                : esc(t("clone_analyzing"))
             }</span>
             <span class="side-note">${
-              plan ? `${esc(t('clone_amount'))} ${esc(plan.size_label)}` : ''
+              plan ? `${esc(t("clone_amount"))} ${esc(plan.size_label)}` : ""
             }</span>
           </div>
           <div class="arrow">→</div>
           <div class="side danger">
-            <span class="side-label">${esc(t('clone_target'))}</span>
-            <strong>${esc(dst?.name ?? '')}</strong>
-            <span class="side-note warn">⚠ ${esc(t('clone_pick_target_hint'))}</span>
+            <span class="side-label">${esc(t("clone_target"))}</span>
+            <strong>${esc(dst?.name ?? "")}</strong><span class="side-note">${esc(dst?.size_label ?? "")} · ${esc(dst?.drive_letters.join(" ") || t("no_letter"))}</span>
+            <span class="side-note warn">⚠ ${esc(t("clone_pick_target_hint"))}</span>
           </div>
         </div>
-        <label class="check">
-          <input type="checkbox" data-verify="1" ${state.verify ? 'checked' : ''}>
-          <span>${esc(t('verify_label'))}</span>
-        </label>
+        ${plan && dst && plan.bytes > dst.size_bytes ? `<p class="capacity-error" role="alert">${esc(t("too_small_target"))}</p>` : ""}
+        ${confirmationOptions()}
       </main>`,
-      foot: `<button class="ghost" data-back="1">${esc(t('back'))}</button>
-             <button class="cta danger" data-go="4" ${plan ? '' : 'disabled'}>${esc(
-               t('clone_go'),
+      foot: `<button class="ghost" data-back="1">${esc(t("back"))}</button>
+             <button class="cta danger" data-go="4" ${canStart() ? "" : "disabled"}>${esc(
+               t("clone_go"),
              )}</button>`,
     };
   }
   if (state.step === 4) {
     return {
       body: progressScreen(cloneStages()),
-      foot: `<button class="ghost" data-cancel="1">${esc(t('cancel'))}</button>`,
+      foot: cancelButton(),
     };
   }
   if (state.step === 6) {
@@ -544,55 +605,78 @@ function cloneScreen(): Screen {
     // 다시 분석할 계기가 없어 "살펴보는 중" 에 멈춘 화면만 보인다.
     return {
       body: errorScreen(),
-      foot: `<button class="ghost" data-mode="home">${esc(t('back'))}</button>
-             <button class="cta" data-mode="clone">${esc(t('retry'))}</button>`,
+      foot: `<button class="ghost" data-mode="home">${esc(t("back"))}</button>
+             <button class="cta" data-mode="clone">${esc(t("retry"))}</button>`,
     };
   }
 
   const cs = state.cloneSummary;
   const copied = cs
-    ? `<div class="written">${esc(t('clone_amount'))} ${esc(
+    ? `<div class="written">${esc(t("clone_amount"))} ${esc(
         fmtBytes(cs.bytes_copied),
-      )} · ${esc(t('clone_partitions', String(cs.partitions)))}</div>`
-    : '';
+      )} · ${esc(t("clone_partitions", String(cs.partitions)))}</div>`
+    : "";
   const verified = cs?.verified
-    ? `<div class="written ok">✓ ${esc(t('done_verified'))}</div>`
-    : '';
+    ? `<div class="written ok">✓ ${esc(t("done_verified"))}</div>`
+    : `<div class="written">${esc(t("not_verified"))}</div>`;
   return {
     body: doneScreen(
-      t('clone_done'),
-      t(
-        'clone_done_sub',
-        cs?.source_name ?? '',
-        cs?.target_name ?? '',
-      ),
+      t("clone_done"),
+      t("clone_done_sub", cs?.source_name ?? "", cs?.target_name ?? ""),
       `${copied}${verified}`,
       state.target,
     ),
-    foot: `<button class="cta" data-mode="home">${esc(t('done'))}</button>`,
+    foot: `<button class="cta" data-mode="home">${esc(t("new_task"))}</button>`,
   };
 }
 
+type Theme = "system" | "light" | "dark";
+let theme: Theme = "system";
+try {
+  const saved = localStorage.getItem("sftool-theme");
+  if (saved === "light" || saved === "dark") theme = saved;
+} catch {
+  /* Optional preference. */
+}
+let lastScreen = "";
 function render() {
+  document.documentElement.lang = getLang();
+  document.documentElement.dataset.theme = theme;
+  const screen = `${state.mode}-${state.step}`;
+  const focused = document.activeElement as HTMLElement | null;
+  const focusKey = focused
+    ?.getAttributeNames()
+    .find((n) => n.startsWith("data-"));
+  const focusValue = focusKey ? focused?.getAttribute(focusKey) : null;
+  const scroll = app.querySelector("main")?.scrollTop ?? 0;
   const banner = state.simulated
-    ? `<div class="sim-banner">${esc(t('simulated'))}</div>`
-    : '';
-  const lang = `<div class="lang">
-      <button data-lang="ko" aria-pressed="${getLang() === 'ko'}">한국어</button>
-      <button data-lang="en" aria-pressed="${getLang() === 'en'}">EN</button>
-    </div>`;
-
-  // 시작 화면에는 단계 막대도 하단 버튼도 없다.
-  if (state.mode === 'home') {
-    app.innerHTML = `${banner}${lang}${homeScreen()}`;
-    warnUnhandledActions();
-    return;
+    ? `<div class="sim-banner">${esc(t("simulated"))}</div>`
+    : "";
+  const header = `<header class="app-header"><div class="brand"><span class="brand-icon">${icon("usb")}</span><div><strong>Xpenology USB</strong><small>${esc(t("app_subtitle"))}</small></div></div>
+    <div class="header-tools"><button class="theme-button" data-theme="1" aria-label="${esc(t("theme"))}">${icon("sun")}<span>${esc(t(`theme_${theme}`))}</span></button>
+    <div class="lang" role="group" aria-label="Language"><button data-lang="ko" aria-pressed="${getLang() === "ko"}">한국어</button><button data-lang="en" aria-pressed="${getLang() === "en"}">EN</button></div></div></header>`;
+  const content =
+    state.mode === "home"
+      ? homeScreen()
+      : (() => {
+          const { body, foot } =
+            state.mode === "clone" ? cloneScreen() : burnScreen();
+          return `${body}<footer>${foot}</footer>`;
+        })();
+  app.innerHTML = `${banner}${header}${content}`;
+  if (screen !== lastScreen) {
+    const title = app.querySelector<HTMLElement>("h1");
+    title?.setAttribute("tabindex", "-1");
+    title?.focus({ preventScroll: true });
+  } else {
+    const main = app.querySelector("main");
+    if (main) main.scrollTop = scroll;
+    if (focusKey)
+      Array.from(app.querySelectorAll<HTMLElement>(`[${focusKey}]`))
+        .find((el) => el.getAttribute(focusKey) === focusValue)
+        ?.focus({ preventScroll: true });
   }
-
-  const { body, foot } = state.mode === 'clone' ? cloneScreen() : burnScreen();
-
-  // 배너가 맨 위, 그 아래 언어 전환. 순서가 겹침을 막는다.
-  app.innerHTML = `${banner}${lang}${body}<footer>${foot}</footer>`;
+  lastScreen = screen;
   warnUnhandledActions();
 }
 
@@ -606,21 +690,48 @@ function render() {
  * 사용자에게는 보이지 않지만, 개발 중에는 즉시 눈에 띈다.
  */
 function warnUnhandledActions() {
-  const buttons = app.querySelectorAll('button');
+  const buttons = app.querySelectorAll("button");
   buttons.forEach((b) => {
     const handled = ACTIONS.some((a) => b.hasAttribute(a));
     if (!handled) {
       console.error(
-        '클릭 처리기가 받지 못하는 버튼:',
+        "클릭 처리기가 받지 못하는 버튼:",
         b.outerHTML.slice(0, 120),
       );
     }
   });
 }
 
-app.addEventListener('click', (e) => {
+app.addEventListener("click", (e) => {
   const el = (e.target as HTMLElement).closest<HTMLElement>(ACTION_SELECTOR);
-  if (!el) return;
+  if (!el || el.matches(":disabled")) return;
+  if (el.dataset.theme) {
+    theme =
+      theme === "system" ? "light" : theme === "light" ? "dark" : "system";
+    try {
+      localStorage.setItem("sftool-theme", theme);
+    } catch {
+      /* Optional preference. */
+    }
+    render();
+    return;
+  }
+  if (el.dataset.copyError) {
+    if (!navigator.clipboard) {
+      el.textContent = t("copy_failed");
+      return;
+    }
+    void navigator.clipboard
+      .writeText(state.failure?.detail ?? "")
+      .then(() => {
+        state.copied = true;
+        render();
+      })
+      .catch(() => {
+        el.textContent = t("copy_failed");
+      });
+    return;
+  }
 
   if (el.dataset.refresh) {
     void refreshDisks();
@@ -638,7 +749,7 @@ app.addEventListener('click', (e) => {
   }
   if (el.dataset.back) {
     // 첫 단계에서의 「뒤로」는 시작 화면이다.
-    if (state.step === 1) startMode('home');
+    if (state.step === 1) startMode("home");
     else {
       state.step = (state.step - 1) as Step;
       render();
@@ -647,27 +758,36 @@ app.addEventListener('click', (e) => {
   }
 
   if (el.dataset.cancel) {
-    // 백엔드에 멈추라고 알린다. 화면 전환은 작업이 실제로 끝난 뒤
-    // write_image / clone_disk 가 반환하면서 이뤄진다.
-    if (!isBrowserPreview()) invoke('cancel_write').catch(() => {});
-    else state.step = 3;
+    if (state.canceling) return;
+    state.canceling = true;
+    state.cancelError = false;
+    if (!isBrowserPreview())
+      invoke("cancel_write").catch(() => {
+        state.canceling = false;
+        state.cancelError = true;
+        render();
+      });
   } else if (el.dataset.disk) {
     const n = Number(el.dataset.disk);
-    if (state.mode === 'clone') {
+    if (state.mode === "clone") {
       // 복제는 고르는 즉시 다음 단계로 간다. pickCloneDisk 가 직접 그린다.
       void pickCloneDisk(n);
       return;
     }
     state.selectedDisk = n;
+    state.selectionId =
+      state.disks.find((d) => d.number === n)?.selection_id ?? null;
   } else if (el.dataset.loader) {
     state.loader = el.dataset.loader as LoaderId;
   } else if (el.dataset.lang) {
     setLang(el.dataset.lang as Lang);
   } else if (el.dataset.go) {
     const next = Number(el.dataset.go) as Step;
+    if (next === 4 && !canStart()) return;
+    if (next === 3) state.acknowledged = false;
     state.step = next;
     if (next === 4) {
-      if (state.mode === 'clone') void startClone();
+      if (state.mode === "clone") void startClone();
       else void startWrite();
     }
     if (next === 1) {
@@ -686,9 +806,14 @@ app.addEventListener('click', (e) => {
  * 클릭 위임 목록에 넣지 않는다. 넣으면 누를 때마다 화면을 다시 그리게 되고,
  * 브라우저가 이미 바꿔 놓은 체크 표시를 우리가 덮어쓰는 모양이 된다.
  */
-app.addEventListener('change', (e) => {
+app.addEventListener("change", (e) => {
   const el = e.target;
-  if (el instanceof HTMLInputElement && el.hasAttribute('data-verify')) {
+  if (el instanceof HTMLInputElement && el.hasAttribute("data-ack")) {
+    state.acknowledged = el.checked;
+    const start = app.querySelector<HTMLButtonElement>('[data-go="4"]');
+    if (start) start.disabled = !canStart();
+  }
+  if (el instanceof HTMLInputElement && el.hasAttribute("data-verify")) {
     state.verify = el.checked;
   }
 });
@@ -696,11 +821,18 @@ app.addEventListener('change', (e) => {
 /** 갈래를 시작한다. 시작 화면으로 돌아가는 것도 여기를 지난다. */
 function startMode(mode: Mode) {
   state.mode = mode;
+  state.acknowledged = false;
+  state.canceling = false;
+  state.cancelError = false;
+  state.copied = false;
   state.step = 1;
   // 갈래를 옮길 때마다 기본값으로 되돌린다. 두 확인 화면 모두 체크박스를
   // 보여주므로, 앞선 갈래에서 켠 것이 다음 갈래까지 따라가지 않게 한다.
   state.verify = false;
   state.selectedDisk = null;
+  state.selectionId = null;
+  state.sourceId = null;
+  state.targetId = null;
   state.source = null;
   state.target = null;
   state.plan = null;
@@ -710,7 +842,7 @@ function startMode(mode: Mode) {
   state.cloneSummary = null;
   state.eject = null;
   render();
-  if (mode !== 'home') void refreshDisks();
+  if (mode !== "home") void refreshDisks();
 }
 
 /**
@@ -722,21 +854,43 @@ function startMode(mode: Mode) {
 async function pickCloneDisk(n: number) {
   if (state.step === 1) {
     state.source = n;
+    state.sourceId =
+      state.disks.find((d) => d.number === n)?.selection_id ?? null;
     state.step = 2;
     render();
     return;
   }
 
+  state.acknowledged = false;
   state.target = n;
+  state.targetId =
+    state.disks.find((d) => d.number === n)?.selection_id ?? null;
   state.step = 3;
   state.plan = null;
   render(); // 먼저 "원본을 살펴보는 중" 을 보여준다
 
+  const sourceId = state.sourceId;
+  const targetId = state.targetId;
   try {
-    state.plan = isBrowserPreview()
+    const plan = isBrowserPreview()
       ? previewPlan
-      : await invoke<SourcePlan>('analyze_source', { diskNumber: state.source });
+      : await invoke<SourcePlan>("analyze_source", { selectionId: sourceId });
+    if (
+      state.mode !== "clone" ||
+      state.step !== 3 ||
+      state.sourceId !== sourceId ||
+      state.targetId !== targetId
+    )
+      return;
+    state.plan = plan;
   } catch (err) {
+    if (
+      state.mode !== "clone" ||
+      state.step !== 3 ||
+      state.sourceId !== sourceId ||
+      state.targetId !== targetId
+    )
+      return;
     state.failure = cloneFailure(err);
     state.step = 6;
   }
@@ -751,15 +905,17 @@ async function pickCloneDisk(n: number) {
  * 사용자가 다 끝난 줄 알고 USB 를 뽑기 때문이다.
  */
 async function startWrite() {
+  state.canceling = false;
+  state.cancelError = false;
   state.progress = null;
   state.failure = null;
 
   if (isBrowserPreview()) {
     simulate(plannedStages(), () => {
       state.summary = {
-        loader: 'm-shell',
-        tag: 'v1.4.2.8',
-        asset_name: 'alpine-redpill.v1.4.2.8.m-shell-5GB.img.gz',
+        loader: "m-shell",
+        tag: "v1.4.2.8",
+        asset_name: "alpine-redpill.v1.4.2.8.m-shell-5GB.img.gz",
         bytes_written: 4_978_638_848,
         verified: state.verify,
       };
@@ -769,14 +925,17 @@ async function startWrite() {
 
   // 백엔드가 흘려보내는 진행 이벤트를 구독한다.
   // 작업이 끝나면 해제해서, 다시 실행할 때 리스너가 쌓이지 않게 한다.
-  const unlisten = await listen<ProgressEvent>('progress', (e) => {
-    state.progress = e.payload;
-    if (state.step === 4) render();
-  });
-
+  let unlisten = () => {};
   try {
-    state.summary = await invoke<RunSummary>('write_image', {
-      diskNumber: state.selectedDisk,
+    unlisten = await listen<ProgressEvent>("progress", (e) => {
+      state.progress = e.payload;
+      if (state.step === 4) render();
+    });
+    // A cancellation during event subscription must not start a new backend job.
+    if (state.canceling) throw new Error("Canceled");
+
+    state.summary = await invoke<RunSummary>("write_image", {
+      selectionId: state.selectionId,
       loader: state.loader,
       verify: state.verify,
     });
@@ -792,6 +951,8 @@ async function startWrite() {
 
 /** 복제를 시작한다. 진행 이벤트는 굽기와 같은 통로로 온다. */
 async function startClone() {
+  state.canceling = false;
+  state.cancelError = false;
   state.progress = null;
   state.failure = null;
 
@@ -802,23 +963,25 @@ async function startClone() {
         partitions: state.plan?.partitions ?? 0,
         verified: state.verify,
         source_name:
-          state.disks.find((d) => d.number === state.source)?.name ?? '',
+          state.disks.find((d) => d.number === state.source)?.name ?? "",
         target_name:
-          state.disks.find((d) => d.number === state.target)?.name ?? '',
+          state.disks.find((d) => d.number === state.target)?.name ?? "",
       };
     });
     return;
   }
 
-  const unlisten = await listen<ProgressEvent>('progress', (e) => {
-    state.progress = e.payload;
-    if (state.step === 4) render();
-  });
-
+  let unlisten = () => {};
   try {
-    state.cloneSummary = await invoke<CloneSummary>('clone_disk', {
-      source: state.source,
-      target: state.target,
+    unlisten = await listen<ProgressEvent>("progress", (e) => {
+      state.progress = e.payload;
+      if (state.step === 4) render();
+    });
+    if (state.canceling) throw new Error("Canceled");
+
+    state.cloneSummary = await invoke<CloneSummary>("clone_disk", {
+      source: state.sourceId,
+      target: state.targetId,
       verify: state.verify,
     });
     state.step = 5;
@@ -839,12 +1002,12 @@ async function startClone() {
  * 있는 것만 골라낸다. 나머지는 굽기와 같은 해석기에 맡긴다.
  */
 function cloneFailure(err: unknown): Failure {
-  const s = typeof err === 'string' ? err : JSON.stringify(err);
-  if (s.includes('Gpt')) return { code: 'layout_gpt' };
-  if (s.includes('NoSignature') || s.includes('NoPartitions')) {
-    return { code: 'layout_nosig' };
+  const s = typeof err === "string" ? err : JSON.stringify(err);
+  if (s.includes("Gpt")) return { code: "layout_gpt" };
+  if (s.includes("NoSignature") || s.includes("NoPartitions")) {
+    return { code: "layout_nosig" };
   }
-  if (s.includes('SameDisk')) return { code: 'same_disk' };
+  if (s.includes("SameDisk")) return { code: "same_disk" };
   return normalizeFailure(err);
 }
 
@@ -856,23 +1019,23 @@ function cloneFailure(err: unknown): Failure {
  */
 async function doEject() {
   const diskNumber = ejectTarget();
-  if (state.eject === 'busy' || diskNumber == null) return;
-  state.eject = 'busy';
+  if (state.eject === "busy" || diskNumber == null) return;
+  state.eject = "busy";
   render();
 
   if (isBrowserPreview()) {
     setTimeout(() => {
-      state.eject = 'ok';
+      state.eject = "ok";
       render();
     }, 700);
     return;
   }
 
   try {
-    await invoke('eject_disk', { diskNumber });
-    state.eject = 'ok';
+    await invoke("eject_disk", { diskNumber });
+    state.eject = "ok";
   } catch {
-    state.eject = 'fail';
+    state.eject = "fail";
   }
   render();
 }
@@ -894,6 +1057,19 @@ function simulate(stages: FlowStage[], finish: () => void) {
   let done = 0;
 
   const tick = () => {
+    if (state.canceling) {
+      state.failure = {
+        code: ["Preparing", "Writing", "Verifying", "Finishing"].includes(
+          stages[si] ?? "",
+        )
+          ? "target_erased"
+          : "canceled",
+      };
+      state.step = 6;
+      state.canceling = false;
+      render();
+      return;
+    }
     if (si >= stages.length) {
       finish();
       state.step = 5;
@@ -918,7 +1094,9 @@ function simulate(stages: FlowStage[], finish: () => void) {
       done_bytes: Math.floor(done),
       total_bytes: total,
       bytes_per_sec: total ? 42_000_000 : null,
-      eta_secs: total ? Math.max(0, Math.floor((total - done) / 42_000_000)) : null,
+      eta_secs: total
+        ? Math.max(0, Math.floor((total - done) / 42_000_000))
+        : null,
       completed: [...completed] as Stage[],
       detail: null,
     };
@@ -935,26 +1113,28 @@ function simulate(stages: FlowStage[], finish: () => void) {
  * 확인하기 위한 것이다. Tauri 안에서는 항상 false 이므로 배포물에는 영향이 없다.
  */
 function isBrowserPreview(): boolean {
-  return !('__TAURI_INTERNALS__' in window);
+  return !("__TAURI_INTERNALS__" in window);
 }
 
 /** 브라우저 미리보기용 표본. Rust 쪽 FakeEnumerator 와 같은 장치들. */
 const previewDisks: DiskEntry[] = [
   {
     number: 2,
-    name: 'SanDisk Ultra USB 3.0',
+    selection_id: "preview-2",
+    name: "SanDisk Ultra USB 3.0",
     size_bytes: 30_752_000_000,
-    size_label: '30.8 GB',
-    drive_letters: ['E:'],
+    size_label: "30.8 GB",
+    drive_letters: ["E:"],
     ready: true,
     blocked_reason: null,
     blocked_detail: null,
   },
   {
     number: 3,
-    name: 'Samsung Flash Drive FIT',
+    selection_id: "preview-3",
+    name: "Samsung Flash Drive FIT",
     size_bytes: 64_055_500_800,
-    size_label: '64.1 GB',
+    size_label: "64.1 GB",
     drive_letters: [],
     ready: true,
     blocked_reason: null,
@@ -962,22 +1142,23 @@ const previewDisks: DiskEntry[] = [
   },
   {
     number: 4,
-    name: 'Generic Flash Disk',
+    selection_id: "preview-4",
+    name: "Generic Flash Disk",
     size_bytes: 4_004_511_744,
-    size_label: '4.00 GB',
-    drive_letters: ['F:'],
+    size_label: "4.00 GB",
+    drive_letters: ["F:"],
     ready: false,
-    blocked_reason: 'too_small_for_any_image',
-    blocked_detail: '8.00 GB',
+    blocked_reason: "too_small_for_any_image",
+    blocked_detail: "8.00 GB",
   },
 ];
 
 /** 브라우저 미리보기용 분석 결과. 32GB USB 에 5GB 로더가 들어 있는 경우. */
 const previewPlan: SourcePlan = {
   bytes: 4_978_638_848,
-  size_label: '4.98 GB',
+  size_label: "4.98 GB",
   partitions: 3,
-  scheme: 'MBR',
+  scheme: "MBR",
 };
 
 /**
@@ -993,7 +1174,7 @@ async function refreshDisks(): Promise<void> {
   try {
     const listed = isBrowserPreview()
       ? { disks: previewDisks, notes: [] }
-      : await invoke<DiskList>('list_disks');
+      : await invoke<DiskList>("list_disks");
     const next = listed.disks;
     state.disks = next;
     state.diskNotes = listed.notes;
@@ -1002,27 +1183,35 @@ async function refreshDisks(): Promise<void> {
     // 대상이 없는 상태가 된다.
     if (
       state.selectedDisk != null &&
-      !next.some((d) => d.number === state.selectedDisk && d.ready)
+      !next.some((d) => d.selection_id === state.selectionId && d.ready)
     ) {
       state.selectedDisk = null;
+      state.selectionId = null;
     }
     // 복제 쪽도 마찬가지다. 뽑힌 USB 를 원본으로 들고 있으면 확인 화면에
     // 이름 없는 상자가 남는다.
-    if (state.source != null && !next.some((d) => d.number === state.source)) {
+    if (
+      state.source != null &&
+      !next.some((d) => d.selection_id === state.sourceId)
+    ) {
       state.source = null;
+      state.sourceId = null;
+      state.plan = null;
+      if (state.mode === "clone") state.step = 1;
     }
-    if (state.target != null && !next.some((d) => d.number === state.target)) {
+    if (
+      state.target != null &&
+      !next.some((d) => d.selection_id === state.targetId)
+    ) {
       state.target = null;
+      state.targetId = null;
+      state.plan = null;
     }
-    // 쓸 수 있는 것이 하나뿐이면 미리 골라둔다.
-    const ready = next.filter((d) => d.ready);
-    if (state.selectedDisk == null && ready.length === 1) {
-      state.selectedDisk = ready[0].number;
-    }
+    // 연결된 장치가 하나여도 사용자가 직접 선택한다.
   } catch (err) {
     // 콘솔에만 적고 빈 목록을 보여주면, 사용자는 USB 가 없다고 읽는다.
     // 열거가 실패한 것과 USB 가 없는 것은 다른 상황이고 할 일도 다르다.
-    console.error('목록 갱신 실패', err);
+    console.error("목록 갱신 실패", err);
     state.disks = [];
     state.diskNotes = [cleanDetail(String(err))];
   } finally {
@@ -1040,9 +1229,10 @@ async function refreshDisks(): Promise<void> {
  */
 function startAutoScan() {
   setInterval(() => {
-    if (state.mode === 'home' || state.scanning) return;
+    if (state.mode === "home" || state.scanning) return;
     // 복제는 2단계에서도 목록을 보여준다.
-    const listing = state.step === 1 || (state.mode === 'clone' && state.step === 2);
+    const listing =
+      state.step === 1 || (state.mode === "clone" && state.step === 2);
     if (listing) void refreshDisks();
   }, 3000);
 }
@@ -1053,16 +1243,14 @@ async function boot() {
       state.simulated = true;
       state.disks = previewDisks;
     } else {
-      state.simulated = await invoke<boolean>('is_simulated');
-      const listed = await invoke<DiskList>('list_disks');
+      state.simulated = await invoke<boolean>("is_simulated");
+      const listed = await invoke<DiskList>("list_disks");
       state.disks = listed.disks;
       state.diskNotes = listed.notes;
     }
     // 선택 가능한 것이 하나뿐이면 미리 골라둔다. 흔한 경우라 클릭을 아낀다.
-    const ready = state.disks.filter((d) => d.ready);
-    if (ready.length === 1) state.selectedDisk = ready[0].number;
   } catch (err) {
-    console.error('열거 실패', err);
+    console.error("열거 실패", err);
     state.diskNotes = [cleanDetail(String(err))];
   } finally {
     state.loading = false;

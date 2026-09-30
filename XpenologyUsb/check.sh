@@ -18,6 +18,7 @@ cd "$(dirname "$0")"
 WIN_TARGET=x86_64-pc-windows-gnu
 
 echo "==> 프런트엔드 빌드"
+npm test
 npm run build
 
 cd src-tauri

@@ -31,15 +31,9 @@ impl RealIo {
         let client = reqwest::blocking::Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(20))
-            // **전체 타임아웃을 명시적으로 끈다.**
-            //
-            // reqwest 의 블로킹 클라이언트는 기본 30초 타임아웃을 갖고 있고,
-            // `connect_timeout` 을 설정해도 그것은 지워지지 않는다. 게다가 그
-            // 제한은 읽기 호출마다 적용돼서, 600MB~1.3GB 를 받는 도중 Wi-Fi 가
-            // 잠깐 끊기거나 절전에서 깨어나는 것만으로 전송이 통째로 버려졌다.
-            // 앞서 이 자리에 "연결 단계에만 제한을 둔다"고 적어뒀는데 사실이
-            // 아니었다.
-            .timeout(None)
+            // Small metadata requests have a bounded lifetime. Large asset downloads
+            // use a cancellable async client with an inactivity deadline instead.
+            .timeout(Duration::from_secs(20))
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self { client })
@@ -85,177 +79,217 @@ impl Io for RealIo {
         on_progress: &mut dyn FnMut(u64, Option<u64>),
         should_stop: &dyn Fn() -> bool,
     ) -> Result<Vec<u8>, String> {
-        /// 연속으로 한 발짝도 못 나간 횟수의 한도.
-        ///
-        /// 예전에는 이것이 **전송 전체**의 예산이었다. 그래서 200MB 마다 끊기는
-        /// 회선에서는 매 시도가 제대로 이어받아 앞으로 나아가는데도 다섯 번째에
-        /// 포기하고 이미 받은 1GB 를 버렸다. 세어야 하는 것은 끊긴 횟수가 아니라
-        /// **소득 없는** 시도의 횟수다.
-        const MAX_FRUITLESS: u32 = 5;
-        /// 전체 시도 횟수의 한도. 진척이 있으면 위 예산이 되살아나므로,
-        /// 서버가 계속 이상하게 굴 때 무한히 도는 것만 막는 뒷문이다.
-        const MAX_ATTEMPTS: u32 = 60;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+        runtime.block_on(async {
+            let client = reqwest::Client::builder()
+                .user_agent(USER_AGENT)
+                .connect_timeout(Duration::from_secs(20))
+                .build()
+                .map_err(|e| e.to_string())?;
+            /// 연속으로 한 발짝도 못 나간 횟수의 한도.
+            ///
+            /// 예전에는 이것이 **전송 전체**의 예산이었다. 그래서 200MB 마다 끊기는
+            /// 회선에서는 매 시도가 제대로 이어받아 앞으로 나아가는데도 다섯 번째에
+            /// 포기하고 이미 받은 1GB 를 버렸다. 세어야 하는 것은 끊긴 횟수가 아니라
+            /// **소득 없는** 시도의 횟수다.
+            const MAX_FRUITLESS: u32 = 5;
+            /// 전체 시도 횟수의 한도. 진척이 있으면 위 예산이 되살아나므로,
+            /// 서버가 계속 이상하게 굴 때 무한히 도는 것만 막는 뒷문이다.
+            const MAX_ATTEMPTS: u32 = 60;
 
-        let mut out: Vec<u8> = Vec::new();
-        let mut last_err = String::new();
-        // 지금까지 도달해 본 최대 길이. 쓸 수 없는 응답을 버리고 다시 받는 일이
-        // 있어서, 현재 길이만 보면 같은 자리를 오가는 것도 진척으로 세게 된다.
-        let mut best = 0usize;
-        let mut fruitless = 0u32;
+            let mut out: Vec<u8> = Vec::new();
+            let mut last_err = String::new();
+            // 지금까지 도달해 본 최대 길이. 쓸 수 없는 응답을 버리고 다시 받는 일이
+            // 있어서, 현재 길이만 보면 같은 자리를 오가는 것도 진척으로 세게 된다.
+            let mut best = 0usize;
+            let mut fruitless = 0u32;
 
-        for attempt in 0..MAX_ATTEMPTS {
-            if fruitless >= MAX_FRUITLESS {
-                break;
-            }
-            if should_stop() {
-                return Err("취소됨".into());
-            }
-            if attempt > 0 {
-                // **연결 자체가 실패한 경우에도** 쉰다. 예전에는 이 잠이 반복문
-                // 맨 끝에 있었고 send() 실패는 `continue` 로 건너뛰어서, 다섯 번의
-                // 시도가 수십 밀리초 만에 다 타버렸다. Wi-Fi 가 1초 끊기는 것만으로
-                // 이미 받아둔 1.2GB 가 날아간 이유가 이것이다.
-                std::thread::sleep(RETRY_BACKOFF);
-            }
-
-            'attempt: {
-                let mut req = self.client.get(url);
-                if !out.is_empty() {
-                    // 이미 받은 만큼은 건너뛴다.
-                    req = req.header("Range", format!("bytes={}-", out.len()));
+            for attempt in 0..MAX_ATTEMPTS {
+                if fruitless >= MAX_FRUITLESS {
+                    break;
+                }
+                if should_stop() {
+                    return Err("취소됨".into());
+                }
+                if attempt > 0 {
+                    // **연결 자체가 실패한 경우에도** 쉰다. 예전에는 이 잠이 반복문
+                    // 맨 끝에 있었고 send() 실패는 `continue` 로 건너뛰어서, 다섯 번의
+                    // 시도가 수십 밀리초 만에 다 타버렸다. Wi-Fi 가 1초 끊기는 것만으로
+                    // 이미 받아둔 1.2GB 가 날아간 이유가 이것이다.
+                    await_io(
+                        async {
+                            tokio::time::sleep(RETRY_BACKOFF).await;
+                            Ok(())
+                        },
+                        should_stop,
+                    )
+                    .await?;
                 }
 
-                let mut res = match req.send() {
-                    Ok(r) => r,
-                    Err(e) => {
-                        last_err = e.to_string();
-                        break 'attempt;
+                'attempt: {
+                    let mut req = client.get(url);
+                    if !out.is_empty() {
+                        // 이미 받은 만큼은 건너뛴다.
+                        req = req.header("Range", format!("bytes={}-", out.len()));
                     }
-                };
 
-                let status = res.status().as_u16();
-                if status != 200 && status != 206 {
-                    return Err(format!("내려받기에 실패했습니다 (HTTP {status})"));
-                }
-
-                // 206 이 **무엇을** 담고 있는지 Content-Range 로 확인한다.
-                //
-                // 예전에는 206 이면 무조건 "요청한 지점부터의 나머지" 라고 믿고
-                // 이어 붙였다. Range 를 잘못 다루는 중간 장비(투명 캐시, HTTPS 를
-                // 가로채는 백신)는 파일 전체나 엉뚱한 구간을 206 으로 돌려준다.
-                // 그걸 붙이면 몸통이 조용히 망가지는데, 완성 검사가 "모자라지
-                // 않은가" 만 보기 때문에 길어진 몸통은 그대로 통과해 굽기까지 갔다.
-                // 전체 크기는 이번 응답에서 매번 새로 읽는다. 시도마다 서버가
-                // 다른 말을 할 수 있으므로 앞선 시도의 값을 들고 있지 않는다.
-                let total: Option<u64> = if status == 200 {
-                    // 서버가 이어받기를 무시하고 처음부터 보낸다. 받은 것을 버리고
-                    // 새로 채운다 — 이어 붙이면 파일이 망가진다.
-                    out.clear();
-                    res.content_length()
-                } else {
-                    let Some((start, instance)) = res
-                        .headers()
-                        .get("content-range")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(parse_content_range)
-                    else {
-                        // 어디서부터인지 말해주지 않는 206 은 붙일 자리를 알 수 없다.
-                        last_err = "서버가 Content-Range 없이 206 을 보냈습니다".into();
-                        break 'attempt;
-                    };
-                    if start != out.len() as u64 {
-                        last_err = format!(
-                            "서버가 {start} 바이트부터 보냈습니다 (요청한 자리: {})",
-                            out.len()
-                        );
-                        // 이 응답은 쓸 수 없다. 붙이지 말고 처음부터 다시 받는다.
-                        out.clear();
-                        break 'attempt;
-                    }
-                    // 전체 크기는 Content-Range 의 뒷부분이 말해준다. 이어받는
-                    // 중이면 Content-Length 는 **남은 양**이라 전체가 아니다.
-                    instance.or_else(|| res.content_length().map(|c| c + start))
-                };
-
-                let mut buf = vec![0u8; 256 * 1024];
-                let mut stalled = false;
-                loop {
-                    match res.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            out.extend_from_slice(&buf[..n]);
-                            on_progress(out.len() as u64, total);
-                            // 청크마다 확인한다. 256KB 단위라 취소가 즉시 반응한다.
-                            if should_stop() {
-                                return Err("취소됨".into());
-                            }
-                        }
+                    let mut res = match await_io(
+                        async { req.send().await.map_err(|e| e.to_string()) },
+                        should_stop,
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
                         Err(e) => {
                             last_err = e.to_string();
-                            stalled = true;
-                            break;
+                            break 'attempt;
+                        }
+                    };
+
+                    let status = res.status().as_u16();
+                    if status != 200 && status != 206 {
+                        return Err(format!("내려받기에 실패했습니다 (HTTP {status})"));
+                    }
+
+                    // 206 이 **무엇을** 담고 있는지 Content-Range 로 확인한다.
+                    //
+                    // 예전에는 206 이면 무조건 "요청한 지점부터의 나머지" 라고 믿고
+                    // 이어 붙였다. Range 를 잘못 다루는 중간 장비(투명 캐시, HTTPS 를
+                    // 가로채는 백신)는 파일 전체나 엉뚱한 구간을 206 으로 돌려준다.
+                    // 그걸 붙이면 몸통이 조용히 망가지는데, 완성 검사가 "모자라지
+                    // 않은가" 만 보기 때문에 길어진 몸통은 그대로 통과해 굽기까지 갔다.
+                    // 전체 크기는 이번 응답에서 매번 새로 읽는다. 시도마다 서버가
+                    // 다른 말을 할 수 있으므로 앞선 시도의 값을 들고 있지 않는다.
+                    let total: Option<u64> = if status == 200 {
+                        // 서버가 이어받기를 무시하고 처음부터 보낸다. 받은 것을 버리고
+                        // 새로 채운다 — 이어 붙이면 파일이 망가진다.
+                        out.clear();
+                        res.content_length()
+                    } else {
+                        let Some((start, instance)) = res
+                            .headers()
+                            .get("content-range")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(parse_content_range)
+                        else {
+                            // 어디서부터인지 말해주지 않는 206 은 붙일 자리를 알 수 없다.
+                            last_err = "서버가 Content-Range 없이 206 을 보냈습니다".into();
+                            break 'attempt;
+                        };
+                        if start != out.len() as u64 {
+                            last_err = format!(
+                                "서버가 {start} 바이트부터 보냈습니다 (요청한 자리: {})",
+                                out.len()
+                            );
+                            // 이 응답은 쓸 수 없다. 붙이지 말고 처음부터 다시 받는다.
+                            out.clear();
+                            break 'attempt;
+                        }
+                        // 전체 크기는 Content-Range 의 뒷부분이 말해준다. 이어받는
+                        // 중이면 Content-Length 는 **남은 양**이라 전체가 아니다.
+                        instance.or_else(|| res.content_length().map(|c| c + start))
+                    };
+
+                    if total.is_some_and(|n| n > MAX_DOWNLOAD_BYTES) {
+                        return Err("압축 이미지가 다운로드 크기 제한(2 GiB)을 초과합니다".into());
+                    }
+                    let mut stalled = false;
+                    loop {
+                        match await_io(
+                            async { res.chunk().await.map_err(|e| e.to_string()) },
+                            should_stop,
+                        )
+                        .await
+                        {
+                            Ok(None) => break,
+                            Ok(Some(chunk)) => {
+                                if out.len() as u64 + chunk.len() as u64 > MAX_DOWNLOAD_BYTES {
+                                    return Err("다운로드 크기 제한(2 GiB)을 초과했습니다".into());
+                                }
+                                out.try_reserve(chunk.len())
+                                    .map_err(|_| "다운로드 메모리가 부족합니다".to_string())?;
+                                out.extend_from_slice(&chunk);
+                                on_progress(out.len() as u64, total);
+                                // 청크마다 확인한다. 256KB 단위라 취소가 즉시 반응한다.
+                                if should_stop() {
+                                    return Err("취소됨".into());
+                                }
+                            }
+                            Err(e) => {
+                                last_err = e.to_string();
+                                stalled = true;
+                                break;
+                            }
+                        }
+                    }
+                    if stalled {
+                        break 'attempt;
+                    }
+
+                    match total {
+                        // 아직 안 끝났다. 다음 시도에서 이어받는다.
+                        Some(t) if (out.len() as u64) < t => {
+                            last_err = format!("연결이 끊겼습니다 ({}/{t} 바이트)", out.len());
+                        }
+                        // 알려준 크기보다 많이 왔다 — 붙이면 안 될 것을 붙였다는 뜻이다.
+                        // 그대로 돌려주면 압축 해제가 깨지는데, 그때는 이미 USB 를
+                        // 지운 뒤라 사용자는 멀쩡한 USB 를 잃고 "압축 해제 실패" 를 본다.
+                        Some(t) if (out.len() as u64) > t => {
+                            last_err = format!(
+                                "받은 양이 알려준 크기보다 많습니다 ({}/{t} 바이트)",
+                                out.len()
+                            );
+                            out.clear();
+                        }
+                        Some(_) => return Ok(out),
+                        // **전체 크기를 모르면 다 받았는지 알 수 없다.**
+                        //
+                        // 깨끗하게 끊긴 연결과 정상 종료가 구별되지 않는다. 이걸
+                        // 성공으로 처리하면, 멤버 경계에서 잘린 multi-member gzip 은
+                        // 오류 없이 풀려서 **부팅되지 않는 이미지가 "검증 완료" 로
+                        // 나간다.** 여기서 다루는 에셋들이 정확히 그 모양이다.
+                        None => {
+                            last_err =
+                                "서버가 전체 크기를 알려주지 않아 다 받았는지 확인할 수 없습니다"
+                                    .into();
                         }
                     }
                 }
-                if stalled {
-                    break 'attempt;
-                }
 
-                match total {
-                    // 아직 안 끝났다. 다음 시도에서 이어받는다.
-                    Some(t) if (out.len() as u64) < t => {
-                        last_err = format!("연결이 끊겼습니다 ({}/{t} 바이트)", out.len());
-                    }
-                    // 알려준 크기보다 많이 왔다 — 붙이면 안 될 것을 붙였다는 뜻이다.
-                    // 그대로 돌려주면 압축 해제가 깨지는데, 그때는 이미 USB 를
-                    // 지운 뒤라 사용자는 멀쩡한 USB 를 잃고 "압축 해제 실패" 를 본다.
-                    Some(t) if (out.len() as u64) > t => {
-                        last_err = format!(
-                            "받은 양이 알려준 크기보다 많습니다 ({}/{t} 바이트)",
-                            out.len()
-                        );
-                        out.clear();
-                    }
-                    Some(_) => return Ok(out),
-                    // **전체 크기를 모르면 다 받았는지 알 수 없다.**
-                    //
-                    // 깨끗하게 끊긴 연결과 정상 종료가 구별되지 않는다. 이걸
-                    // 성공으로 처리하면, 멤버 경계에서 잘린 multi-member gzip 은
-                    // 오류 없이 풀려서 **부팅되지 않는 이미지가 "검증 완료" 로
-                    // 나간다.** 여기서 다루는 에셋들이 정확히 그 모양이다.
-                    None => {
-                        last_err =
-                            "서버가 전체 크기를 알려주지 않아 다 받았는지 확인할 수 없습니다"
-                                .into();
-                    }
+                // 이번 시도가 실제로 앞으로 나아갔는가.
+                if out.len() > best {
+                    best = out.len();
+                    fruitless = 0;
+                } else {
+                    fruitless += 1;
                 }
             }
 
-            // 이번 시도가 실제로 앞으로 나아갔는가.
-            if out.len() > best {
-                best = out.len();
-                fruitless = 0;
-            } else {
-                fruitless += 1;
-            }
-        }
-
-        Err(format!(
-            "내려받기를 여러 번 시도했지만 완료하지 못했습니다: {last_err}"
-        ))
+            Err(format!(
+                "내려받기를 여러 번 시도했지만 완료하지 못했습니다: {last_err}"
+            ))
+        })
     }
 
     /// 체크섬 파일 하나를 받는다.
     ///
-    /// 이어받기도 진행률도 없다. RR 이 올리는 sha256sum 은 400바이트대라
-    /// 한 번에 받지 못하면 그냥 실패로 두는 편이 낫다 — 호출부가 이 실패를
-    /// 굽기를 막는 이유로 쓰지 않기 때문이다.
+    /// Published checksums are mandatory once advertised; failures reach the caller.
     fn fetch_text(&self, url: &str) -> Result<String, String> {
         let res = self.client.get(url).send().map_err(|e| e.to_string())?;
         if !res.status().is_success() {
             return Err(format!("체크섬을 가져오지 못했습니다 ({})", res.status()));
         }
-        res.text().map_err(|e| e.to_string())
+        let mut body = String::new();
+        res.take(1024 * 1024 + 1)
+            .read_to_string(&mut body)
+            .map_err(|e| e.to_string())?;
+        if body.len() > 1024 * 1024 {
+            return Err("체크섬 파일이 너무 큽니다".into());
+        }
+        Ok(body)
     }
 
     fn open_decompressed(
@@ -306,24 +340,105 @@ impl Io for RealIo {
                 .map(|(_, i)| i)
                 .ok_or_else(|| "압축 파일 안에 .img 가 없습니다".to_string())?;
 
-            // ZipArchive 는 빌린 상태로 반환할 수 없어 통째로 풀어 담는다.
-            // 이미지가 3GB 대라 메모리를 크게 쓰지만, 임시 파일을 만드는 것보다
-            // 디스크 여유가 없는 기계에서 안전하다.
-            let mut f = archive.by_index(idx).map_err(|e| e.to_string())?;
-            // zip 중앙 디렉터리에는 푼 크기가 정확히 들어 있다.
-            let size = f.size();
-            // 다만 그 값은 **아직 CRC 로 확인되지 않은 남의 말**이다. 그대로
-            // `with_capacity` 에 넘기면 말도 안 되는 크기를 요구했을 때 러스트가
-            // 할당 실패로 프로세스를 죽인다 — 창이 오류 한 줄 없이 사라진다.
-            let mut out = Vec::new();
-            out.try_reserve_exact(size as usize).map_err(|_| {
-                format!("이미지를 담을 메모리가 모자랍니다 ({size} 바이트가 필요합니다)")
-            })?;
-            f.read_to_end(&mut out).map_err(|e| e.to_string())?;
-            return Ok((Box::new(std::io::Cursor::new(out)), Some(size)));
+            let size = archive.by_index(idx).map_err(|e| e.to_string())?.size();
+            if size == 0 || size > MAX_IMAGE_BYTES {
+                return Err("ZIP 이미지 크기는 0보다 크고 16 GiB 이하여야 합니다".into());
+            }
+            // The worker owns the archive, avoiding a self-referential ZipFile.
+            // Two bounded chunks replace the previous multi-gigabyte output buffer.
+            let (tx, rx) = std::sync::mpsc::sync_channel(2);
+            std::thread::Builder::new()
+                .name("zip-image".into())
+                .spawn(move || {
+                    let result = (|| -> Result<(), String> {
+                        let mut file = archive.by_index(idx).map_err(|e| e.to_string())?;
+                        let mut total = 0u64;
+                        loop {
+                            let mut chunk = vec![0; 256 * 1024];
+                            let n = file.read(&mut chunk).map_err(|e| e.to_string())?;
+                            if n == 0 {
+                                break;
+                            }
+                            total += n as u64;
+                            if total > size {
+                                return Err("ZIP 이미지 크기가 선언된 크기를 초과했습니다".into());
+                            }
+                            chunk.truncate(n);
+                            if tx.send(Ok(chunk)).is_err() {
+                                return Ok(());
+                            }
+                        }
+                        if total != size {
+                            return Err("ZIP 이미지가 잘렸습니다".into());
+                        }
+                        // Explicit EOF; a panicking worker must never look like success.
+                        let _ = tx.send(Ok(Vec::new()));
+                        Ok(())
+                    })();
+                    if let Err(e) = result {
+                        let _ = tx.send(Err(e));
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+            return Ok((
+                Box::new(ZipStream {
+                    rx,
+                    current: std::io::Cursor::new(Vec::new()),
+                    done: false,
+                }),
+                Some(size),
+            ));
         }
 
         Err(format!("알 수 없는 압축 형식입니다: {name}"))
+    }
+}
+
+const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+async fn await_io<T>(
+    future: impl std::future::Future<Output = Result<T, String>>,
+    canceled: &dyn Fn() -> bool,
+) -> Result<T, String> {
+    tokio::pin!(future);
+    let deadline = tokio::time::sleep(Duration::from_secs(30));
+    tokio::pin!(deadline);
+    loop {
+        if canceled() {
+            return Err("취소됨".into());
+        }
+        tokio::select! {
+            result = &mut future => return result,
+            _ = &mut deadline => return Err("30초 동안 네트워크 응답이 없습니다".into()),
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+    }
+}
+
+struct ZipStream {
+    rx: std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    current: std::io::Cursor<Vec<u8>>,
+    done: bool,
+}
+impl Read for ZipStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let n = self.current.read(buf)?;
+            if n != 0 || self.done {
+                return Ok(n);
+            }
+            let chunk = self
+                .rx
+                .recv()
+                .map_err(|_| std::io::Error::other("ZIP 작업이 중단되었습니다"))?
+                .map_err(std::io::Error::other)?;
+            self.done = chunk.is_empty();
+            self.current = std::io::Cursor::new(chunk);
+        }
     }
 }
 
@@ -638,5 +753,60 @@ mod tests {
 
         assert_eq!(size, Some(real.len() as u64), "고른 항목의 크기가 다르다");
         assert_eq!(out, real, "껍데기 항목을 이미지로 골랐다");
+    }
+    #[test]
+    fn stalled_body_can_be_canceled_without_waiting_for_network() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/asset", listener.local_addr().unwrap());
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut r = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new();
+            while r.read_line(&mut line).unwrap() > 0 {
+                if line == "\r\n" {
+                    break;
+                }
+                line.clear();
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10000\r\n\r\n")
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            let _ = stop_rx.recv_timeout(Duration::from_secs(5));
+        });
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = cancel.clone();
+        let downloader = std::thread::spawn(move || {
+            RealIo::new().unwrap().download(&url, &mut |_, _| {}, &|| {
+                flag.load(std::sync::atomic::Ordering::Relaxed)
+            })
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let start = std::time::Instant::now();
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(downloader.join().unwrap().unwrap_err().contains("취소"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let _ = stop_tx.send(());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn excessive_download_length_is_rejected_before_allocating() {
+        let url = serve(|_, _| head(&format!("Content-Length: {}", MAX_DOWNLOAD_BYTES + 1)));
+        assert!(get(&url).unwrap_err().contains("크기 제한"));
+    }
+
+    #[test]
+    fn disconnected_zip_worker_is_not_successful_eof() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        drop(tx);
+        let mut reader = ZipStream {
+            rx,
+            current: std::io::Cursor::new(vec![]),
+            done: false,
+        };
+        assert!(reader.read(&mut [0; 1]).is_err());
     }
 }

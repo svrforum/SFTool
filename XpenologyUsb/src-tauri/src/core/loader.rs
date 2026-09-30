@@ -164,9 +164,11 @@ fn select_asset(loader: Loader, assets: &[Asset]) -> Option<&Asset> {
 }
 
 /// 체크섬 에셋인가.
-fn is_checksum(name: &str) -> bool {
+fn is_checksum(name: &str, image: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower == "sha256sum" || lower.ends_with(".sha256")
+    lower == "sha256sum"
+        || lower == "sha256sums"
+        || lower == format!("{}.sha256", image.to_ascii_lowercase())
 }
 
 /// 릴리스 목록에서 실제로 쓸 수 있는 이미지를 찾는다.
@@ -190,7 +192,7 @@ pub fn resolve(loader: Loader, releases: &[Release]) -> Result<ResolvedImage, Re
         let checksum_url = release
             .assets
             .iter()
-            .find(|a| is_checksum(&a.name))
+            .find(|a| is_checksum(&a.name, &image.name))
             .map(|a| a.browser_download_url.clone());
 
         return Ok(ResolvedImage {
