@@ -178,3 +178,10 @@ jobs:
             XpenologyUsb/playwright-report/
             XpenologyUsb/test-results/
           retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-ui-screenshots
+          path: XpenologyUsb/test-results/**/*.png
+          retention-days: 14

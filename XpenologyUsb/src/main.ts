@@ -729,7 +729,7 @@ function warnUnhandledActions() {
 
 app.addEventListener("click", (e) => {
   const el = (e.target as HTMLElement).closest<HTMLElement>(ACTION_SELECTOR);
-  if (!el || el.matches(":disabled")) return;
+  if (!el || !app.contains(el) || el.matches(":disabled")) return;
   if (el.dataset.theme) {
     theme =
       theme === "system" ? "light" : theme === "light" ? "dark" : "system";
@@ -1276,7 +1276,7 @@ async function boot() {
       state.diskNotes = listed.notes;
       state.scanError = null;
     }
-    // 선택 가능한 것이 하나뿐이면 미리 골라둔다. 흔한 경우라 클릭을 아낀다.
+    // 장치 선택은 사용자의 명시적인 조작으로만 바꾼다.
   } catch (err) {
     console.error("열거 실패", err);
     state.diskNotes = [];

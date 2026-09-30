@@ -272,3 +272,27 @@ test("device refresh preserves heading focus after screen navigation", async () 
   await settle();
   expect(document.activeElement).toBe(document.querySelector("h1"));
 });
+
+test("native checkbox clicks update consent without triggering the root theme attribute", async () => {
+  click('[data-mode="burn"]');
+  await settle();
+  click('[data-disk="2"]');
+  click('[data-go="2"]');
+  click('[data-go="3"]');
+  const theme = document.documentElement.dataset.theme;
+  const consent = document.querySelector<HTMLInputElement>("[data-ack]")!;
+  consent.click();
+  expect(consent.isConnected).toBe(true);
+  expect(consent.checked).toBe(true);
+  expect(document.documentElement.dataset.theme).toBe(theme);
+  expect(
+    document.querySelector<HTMLButtonElement>('[data-go="4"]')!.disabled,
+  ).toBe(false);
+  document.querySelector<HTMLInputElement>("[data-verify]")!.click();
+  click('[data-go="4"]');
+  await settle();
+  expect(invoke).toHaveBeenCalledWith(
+    "write_image",
+    expect.objectContaining({ verify: true }),
+  );
+});
