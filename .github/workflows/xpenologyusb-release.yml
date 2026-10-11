@@ -110,6 +110,23 @@ jobs:
           # 쓰지 않으므로 latest.json 을 올리지 않는다.
           uploadUpdaterJson: false
 
+      - name: Validate embedded Windows manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
+          $mt = Get-ChildItem "$kits/*/x64/mt.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (!$mt) { throw 'Windows SDK manifest tool is missing' }
+          $exe = Join-Path $PWD 'XpenologyUsb/src-tauri/target/release/xpenologyusb.exe'
+          $manifest = Join-Path $env:RUNNER_TEMP 'xpenologyusb-embedded.manifest'
+          & $mt.FullName "-inputresource:$exe;#1" "-out:$manifest"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot extract embedded Windows manifest' }
+          [xml]$xml = Get-Content -LiteralPath $manifest -Raw -Encoding utf8
+          $admin = $xml.SelectSingleNode("//*[local-name()='requestedExecutionLevel']")
+          $controls = $xml.SelectSingleNode("//*[local-name()='assemblyIdentity' and @name='Microsoft.Windows.Common-Controls']")
+          if (!$admin -or $admin.level -ne 'requireAdministrator') { throw 'Administrator manifest is missing' }
+          if (!$controls -or $controls.version -ne '6.0.0.0') { throw 'Common Controls 6 manifest is missing' }
+
       # 포터블 단일 실행 파일을 올린다.
       #
       # tauri-action 이 올리는 것은 설치 프로그램뿐이다. 이 도구는 한 번 쓰고
