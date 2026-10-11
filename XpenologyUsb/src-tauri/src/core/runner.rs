@@ -147,9 +147,8 @@ pub trait Io {
 /// 찾고, 줄이 딱 하나뿐이면 이름을 따지지 않는다 (에셋 이름만 담은 `.sha256`
 /// 파일이 그렇다).
 ///
-/// **못 찾으면 None 이고, None 은 검사를 건너뛴다는 뜻이다.** 형식이 낯설다는
-/// 이유로 굽기를 막으면, 저장소가 파일 모양을 바꾸는 날 프로그램이 통째로
-/// 쓸모없어진다. 우리가 막으려는 것은 망가진 전송이지 낯선 형식이 아니다.
+/// Missing or unparseable hashes return None. The caller rejects a published
+/// checksum that cannot be checked; only releases without a checksum skip it.
 fn checksum_for(body: &str, asset_name: &str) -> Option<[u8; 32]> {
     let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
     let pick = lines
@@ -219,6 +218,20 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
     let image: ResolvedImage = super::loader::resolve(cfg.loader, &releases)
         .map_err(|e| RunError::Resolve(format!("{e:?}")))?;
 
+    run_resolved(cfg, disk, protected, io, writer, cancel, image, rep)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_resolved<F: FnMut(super::pipeline::ProgressEvent)>(
+    cfg: RunConfig,
+    disk: &DiskInfo,
+    protected: &HashSet<u32>,
+    io: &dyn Io,
+    writer: &dyn RawWriter,
+    cancel: &dyn Cancel,
+    image: ResolvedImage,
+    mut rep: ProgressReporter<F>,
+) -> Result<RunSummary, RunError> {
     // 용량 확인은 압축을 푼 크기로 해야 맞다. 여기서는 아직 모르므로
     // 최소 용량 규칙만 먼저 적용하고, 실제 크기 확인은 쓰기 단계에서 한다.
     safety::can_write(disk, protected, 0, None).map_err(RunError::Rejected)?;
@@ -282,10 +295,7 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
     // 길이만 맞고 내용이 어긋나는 경우까지 여기서 걸러진다. m-shell 은 체크섬을
     // 올리지 않으므로 없는 것이 정상이고, 없다고 실패시키면 안 된다.
     //
-    // 체크섬 파일을 못 받았거나 형식을 못 읽은 경우도 통과시킨다. 우리가 막으려는
-    // 것은 망가진 전송이지 낯선 형식이 아니고, 400바이트짜리 곁다리 파일이 안
-    // 받아졌다고 굽기 전체를 막으면 그게 더 나쁘다. **어긋난 것이 확인됐을 때만**
-    // 멈춘다.
+    // An advertised checksum must be readable and match before opening the target.
     if let Some(url) = &image.checksum_url {
         let body = io
             .fetch_text(url)
@@ -349,7 +359,7 @@ pub fn run<F: FnMut(super::pipeline::ProgressEvent)>(
 /// [`run`] 에서 떼어낸 이유는 오직 하나, **되돌릴 수 없는 지점 이후의 실패를
 /// 한 자리에서 감싸기 위해서**다. 흐름 자체는 바뀌지 않았다.
 #[allow(clippy::too_many_arguments)]
-fn write_to_target<F: FnMut(super::pipeline::ProgressEvent)>(
+pub(super) fn write_to_target<F: FnMut(super::pipeline::ProgressEvent)>(
     cfg: &RunConfig,
     disk: &DiskInfo,
     mut session: Box<dyn WriteSession>,

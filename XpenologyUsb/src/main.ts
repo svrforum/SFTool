@@ -35,6 +35,8 @@ import {
 import "./styles.css";
 
 type LoaderId = "MShell" | "Rr";
+type ImageEntry = { id: string; tag: string; asset_name: string; size_bytes: number; checksum: boolean };
+type LocalEntry = { name: string; size_bytes: number };
 type Step = 1 | 2 | 3 | 4 | 5 | 6;
 
 /** 시작 화면에서 고르는 갈래. */
@@ -114,6 +116,17 @@ type State = {
    */
   diskNotes: string[];
   scanError: string | null;
+  sourceKind: "online" | "local";
+  images: ImageEntry[];
+  imageId: string | null;
+  imageLoading: boolean;
+  imageError: Failure | null;
+  localImage: LocalEntry | null;
+  useCache: boolean;
+  cacheMessage: string;
+  closeBlocked: boolean;
+  diagnostic: Record<string, string>;
+  ejectError: string;
 };
 
 const state: State = {
@@ -156,10 +169,22 @@ const state: State = {
   scanning: false,
   diskNotes: [],
   scanError: null,
+  sourceKind: "online",
+  images: [],
+  imageId: null,
+  imageLoading: false,
+  imageError: null,
+  localImage: null,
+  useCache: true,
+  cacheMessage: "",
+  closeBlocked: false,
+  diagnostic: {},
+  ejectError: "",
 };
 
 /** 굽기의 단계 순서. 검증은 선택이라 켰을 때만 들어간다. */
 function plannedStages(): FlowStage[] {
+  if (state.sourceKind === "local") return cloneStages().filter((s) => s !== "Analyzing");
   const s: FlowStage[] = [
     "Resolving",
     "Downloading",
@@ -256,11 +281,32 @@ function canStart(): boolean {
   return (
     state.acknowledged &&
     !!disk?.ready &&
+    (state.mode !== "burn" || (imageReady() && (!state.localImage || state.sourceKind !== "local" || state.localImage.size_bytes <= disk.size_bytes))) &&
     (state.mode !== "clone" ||
       (!!state.plan &&
         state.plan.bytes <= disk.size_bytes &&
         state.sourceId !== state.targetId))
   );
+}
+function chosenImage() { return state.images.find((i) => i.id === state.imageId); }
+function imageReady() { return !state.imageLoading && (state.sourceKind === "local" ? !!state.localImage : !!chosenImage()); }
+function imageDetails(): string {
+  const image = chosenImage();
+  const local = state.sourceKind === "local" ? state.localImage : null;
+  if (!image && !local) return "";
+  return `<div class="image-details"><strong>${esc(local?.name ?? image?.asset_name ?? "")}</strong><span>${esc(fmtBytes(local?.size_bytes ?? image?.size_bytes ?? 0))} · ${esc(local ? t("local_checksum") : t(image?.checksum ? "checksum_yes" : "checksum_no"))}</span></div>`;
+}
+function imageControls(): string {
+  return `<div class="source-tabs" role="tablist" aria-label="${esc(t("selected_loader"))}">
+    <button role="tab" data-source="online" aria-selected="${state.sourceKind === "online"}" ${state.imageLoading && state.sourceKind === "local" ? "disabled" : ""}>${esc(t("source_online"))}</button>
+    <button role="tab" data-source="local" aria-selected="${state.sourceKind === "local"}" ${state.imageLoading && state.sourceKind === "local" ? "disabled" : ""}>${esc(t("source_local"))}</button></div>
+    ${state.sourceKind === "online" ? `<div class="loader-choices">${loaderItem("MShell", "m-shell", t("mshell_sub"), true)}${loaderItem("Rr", "RR", t("rr_sub"), false)}</div>
+    <label class="field-label" for="image-version">${esc(t("image_version"))}</label><div class="version-row"><select id="image-version" data-version="1" ${state.imageLoading || !state.images.length ? "disabled" : ""}>
+    ${state.images.length ? state.images.map((i, index) => `<option value="${esc(i.id)}" ${i.id === state.imageId ? "selected" : ""}>${esc(i.tag)}${index === 0 ? " · " + esc(t("latest")) : ""}</option>`).join("") : `<option>${esc(t("image_loading"))}</option>`}</select><button class="refresh" data-reload-images="1" ${state.imageLoading ? "disabled" : ""} title="${esc(t("refresh"))}" aria-label="${esc(t("refresh"))}">${icon("refresh")}</button></div>`
+    : `<button class="file-picker" data-pick-image="1" ${state.imageLoading ? "disabled" : ""}>${icon("folder")}${esc(t(state.imageLoading ? "image_checking" : "image_pick"))}</button>`}
+    ${state.imageLoading ? `<p class="small-note" role="status">${esc(t(state.sourceKind === "local" ? "image_checking" : "image_loading"))}</p>` : imageDetails()}
+    ${state.imageError ? `<div class="inline-error" role="alert">${esc(t("err_" + state.imageError.code))}<details><summary>${esc(t("error_details"))}</summary><pre>${esc(state.imageError.detail ?? "")}</pre></details></div>` : ""}
+    ${state.sourceKind === "online" ? `<div class="cache-row"><label class="check"><input type="checkbox" data-cache="1" ${state.useCache ? "checked" : ""}><span>${esc(t("cache_use"))}</span></label><button class="refresh" data-clear-cache="1" title="${esc(t("cache_clear"))}" aria-label="${esc(t("cache_clear"))}">${icon("trash")}</button></div><p class="small-note" role="status">${esc(state.cacheMessage || t("cache_hint"))}</p>` : ""}`;
 }
 function confirmationOptions(): string {
   return `<div class="verify-option"><label class="check"><input type="checkbox" data-verify="1" ${state.verify ? "checked" : ""}>
@@ -275,12 +321,7 @@ function cancelButton(): string {
 
 function homeScreen(): string {
   return `<main class="home">
-    <section class="hero"><div class="hero-copy"><span class="eyebrow">${esc(t("hero_tag"))}</span>
-      <h1>${nl(t("home_title"))}</h1><p class="lead">${esc(t("home_lead"))}</p>
-      <span class="hero-caption">${icon("shield")}${esc(t("hero_caption"))}</span></div>
-      <div class="usb-art" aria-hidden="true"><div class="usb-orbit orbit-one"></div><div class="usb-orbit orbit-two"></div><div class="usb-drive"><div class="usb-plug"><i></i><i></i></div><div class="usb-body">${icon("usb")}<span>USB</span><b></b></div></div><span class="art-spark spark-one"></span><span class="art-spark spark-two"></span></div>
-    </section>
-    <h2 class="section-label">${esc(t("choice_label"))}</h2>
+    <h1>${esc(t("choice_label"))}</h1>
     <div class="modes">
       <button class="mode primary-mode" data-mode="burn"><span class="mode-top"><span class="mode-ico">${icon("download")}</span><span class="mode-index">01</span></span>
         <span class="mode-name">${esc(t("mode_burn_title"))}</span><span class="mode-sub">${esc(t("mode_burn_sub"))}</span>
@@ -389,6 +430,7 @@ function doneScreen(
         <p class="lead">${esc(sub)}</p>
         ${extra}
         ${diskNumber == null ? "" : ejectBlock(state.eject)}
+        ${state.ejectError ? `<p class="inline-error" role="alert">${esc(state.ejectError)}</p>` : ""}
       </div>
       <div class="note explain">
         <span>ℹ</span>
@@ -411,7 +453,7 @@ function errorScreen(): string {
         : t(`err_${code}`);
   const why =
     code === "canceled"
-      ? t("cancel_body")
+      ? t(f?.target_erased ? "err_target_erased_why" : "cancel_body")
       : t(`err_${code}_why`) === `err_${code}_why`
         ? t("err_generic_why")
         : t(`err_${code}_why`);
@@ -422,13 +464,14 @@ function errorScreen(): string {
       <div class="error-box">
         <div class="what">${esc(what)}</div>
         <div class="why">${esc(why)}</div>
+        ${f?.target_erased ? `<p class="inline-error">${esc(t("erased_notice"))}</p>` : ""}
         ${
           f?.detail
-            ? `<details class="error-detail" open><summary>${esc(t("error_details"))}</summary><pre>${esc(f.detail)}</pre></details>
-          <button class="mini" data-copy-error="1">${esc(t(state.copied ? "copied" : "copy_error"))}</button>`
+            ? `<details class="error-detail"><summary>${esc(t("error_details"))}</summary><pre>${esc(f.detail)}</pre></details>`
             : ""
         }
       </div>
+      <button class="mini" data-copy-error="1">${icon("copy")}${esc(t(state.copied ? "copied" : "diagnostics_copy"))}</button>
     </main>`;
 }
 
@@ -444,7 +487,7 @@ function burnScreen(): Screen {
           <h1>${nl(t("step1_title"))}</h1>
           <button class="refresh" data-refresh="1" ${
             state.scanning ? "disabled" : ""
-          } title="${esc(t("refresh"))}">${state.scanning ? "⋯" : "↻"}</button>
+          } title="${esc(t("refresh"))}" aria-label="${esc(t("refresh"))}">${icon("refresh")}</button>
         </div>
         <p class="lead">${esc(t("step1_lead"))}</p>
         <div class="list">${diskList(state.disks, state.selectedDisk)}</div>
@@ -464,13 +507,10 @@ function burnScreen(): Screen {
         <h1>${nl(t("step2_title"))}</h1>
         <p class="lead">${esc(t("step2_lead"))}</p>
         ${selectionStrip(selected(), t("selected_target"))}
-        <div class="list">
-          ${loaderItem("MShell", "m-shell", t("mshell_sub"), true)}
-          ${loaderItem("Rr", "RR", t("rr_sub"), false)}
-        </div><p class="loader-note">${icon("download")}${esc(t("loader_official"))}</p>
+        ${imageControls()}
       </main>`,
-      foot: `<button class="ghost" data-go="1">${esc(t("back"))}</button>
-             <button class="cta" data-go="3">${esc(t("next"))}</button>`,
+      foot: `<button class="ghost" data-go="1" ${state.imageLoading && state.sourceKind === "local" ? "disabled" : ""}>${esc(t("back"))}</button>
+             <button class="cta" data-go="3" ${imageReady() ? "" : "disabled"}>${esc(t("next"))}</button>`,
     };
   }
   if (state.step === 3) {
@@ -488,10 +528,10 @@ function burnScreen(): Screen {
             d?.drive_letters.length
               ? ` · ${esc(d.drive_letters.join(" "))}`
               : ""
-          }</div>
+          } · ${esc(t("device_number", String(d?.number ?? "")))}</div>
         </div>
-        <div class="summary-row"><span>${esc(t("selected_loader"))}</span><strong>${state.loader === "MShell" ? "m-shell" : "RR"}</strong></div>
-        <div class="note"><span>ℹ</span><span>${esc(t("confirm_reminder"))}</span></div>
+        <div class="summary-row"><span>${esc(t("selected_loader"))}</span><strong>${state.sourceKind === "local" ? esc(t("source_local")) : `${state.loader === "MShell" ? "m-shell" : "RR"} ${esc(chosenImage()?.tag ?? "")}`}</strong></div>
+        ${imageDetails()}
         ${confirmationOptions()}
       </main>`,
       foot: `<button class="ghost" data-go="2">${esc(t("back"))}</button>
@@ -519,12 +559,12 @@ function burnScreen(): Screen {
   const sm = state.summary;
   const written = sm
     ? `<div class="written">${esc(
-        t("done_written", sm.loader, sm.tag, fmtBytes(sm.bytes_written)),
+        t("done_written", sm.loader === "Local" ? sm.asset_name : sm.loader, sm.tag, fmtBytes(sm.bytes_written)),
       )}</div>`
     : "";
   const verified = sm?.verified
-    ? `<div class="written ok">✓ ${esc(t("done_verified"))}</div>`
-    : `<div class="written">${esc(t("not_verified"))}</div>`;
+    ? `<div class="result-status verified">${icon("shield")}${esc(t("written_verified"))}</div>`
+    : `<div class="result-status unverified">${icon("warning")}${esc(t("written_unverified"))}</div>`;
   return {
     body: doneScreen(
       t("done_title"),
@@ -532,7 +572,7 @@ function burnScreen(): Screen {
       `${written}${verified}`,
       state.selectedDisk,
     ),
-    foot: `<button class="cta" data-mode="home">${esc(t("new_task"))}</button>`,
+    foot: `<button class="ghost" data-mode="home">${esc(t("new_task"))}</button>`,
   };
 }
 
@@ -548,12 +588,12 @@ function cloneScreen(): Screen {
           <h1>${nl(t("clone_pick_source"))}</h1>
           <button class="refresh" data-refresh="1" ${
             state.scanning ? "disabled" : ""
-          } title="${esc(t("refresh"))}">${state.scanning ? "⋯" : "↻"}</button>
+          } title="${esc(t("refresh"))}" aria-label="${esc(t("refresh"))}">${icon("refresh")}</button>
         </div>
         <p class="lead">${esc(t("clone_pick_source_hint"))}</p>
         <div class="list">${diskList(state.disks, state.source, true)}</div>
       </main>`,
-      foot: `<button class="ghost" data-back="1">${esc(t("back"))}</button>`,
+      foot: `<button class="ghost" data-back="1">${esc(t("back"))}</button><button class="cta" data-go="2" ${state.sourceId ? "" : "disabled"}>${esc(t("next"))}</button>`,
     };
   }
   if (state.step === 2) {
@@ -572,7 +612,7 @@ function cloneScreen(): Screen {
         )}
         <div class="list">${diskList(choices, state.target)}</div>
       </main>`,
-      foot: `<button class="ghost" data-back="1">${esc(t("back"))}</button>`,
+      foot: `<button class="ghost" data-back="1">${esc(t("back"))}</button><button class="cta" data-go="3" ${state.targetId ? "" : "disabled"}>${esc(t("next"))}</button>`,
     };
   }
   if (state.step === 3) {
@@ -590,7 +630,7 @@ function cloneScreen(): Screen {
         <div class="clone-confirm">
           <div class="side">
             <span class="side-label">${esc(t("clone_source"))}</span>
-            <strong>${esc(src?.name ?? "")}</strong><span class="side-note">${esc(src?.size_label ?? "")} · ${esc(src?.drive_letters.join(" ") || t("no_letter"))}</span>
+            <strong>${esc(src?.name ?? "")}</strong><span class="side-note">${esc(src?.size_label ?? "")} · ${esc(t("device_number", String(src?.number ?? "")))} · ${esc(src?.drive_letters.join(" ") || t("no_letter"))}</span>
             <span class="side-note">${
               plan
                 ? `${esc(plan.scheme)} · ${esc(
@@ -605,7 +645,7 @@ function cloneScreen(): Screen {
           <div class="arrow">→</div>
           <div class="side danger">
             <span class="side-label">${esc(t("clone_target"))}</span>
-            <strong>${esc(dst?.name ?? "")}</strong><span class="side-note">${esc(dst?.size_label ?? "")} · ${esc(dst?.drive_letters.join(" ") || t("no_letter"))}</span>
+            <strong>${esc(dst?.name ?? "")}</strong><span class="side-note">${esc(dst?.size_label ?? "")} · ${esc(t("device_number", String(dst?.number ?? "")))} · ${esc(dst?.drive_letters.join(" ") || t("no_letter"))}</span>
             <span class="side-note warn">⚠ ${esc(t("clone_pick_target_hint"))}</span>
           </div>
         </div>
@@ -641,8 +681,8 @@ function cloneScreen(): Screen {
       )} · ${esc(t("clone_partitions", String(cs.partitions)))}</div>`
     : "";
   const verified = cs?.verified
-    ? `<div class="written ok">✓ ${esc(t("done_verified"))}</div>`
-    : `<div class="written">${esc(t("not_verified"))}</div>`;
+    ? `<div class="result-status verified">${icon("shield")}${esc(t("written_verified"))}</div>`
+    : `<div class="result-status unverified">${icon("warning")}${esc(t("written_unverified"))}</div>`;
   return {
     body: doneScreen(
       t("clone_done"),
@@ -650,7 +690,7 @@ function cloneScreen(): Screen {
       `${copied}${verified}`,
       state.target,
     ),
-    foot: `<button class="cta" data-mode="home">${esc(t("new_task"))}</button>`,
+    foot: `<button class="ghost" data-mode="home">${esc(t("new_task"))}</button>`,
   };
 }
 
@@ -678,7 +718,7 @@ function render() {
     : "";
   const header = `<header class="app-header"><div class="brand"><span class="brand-icon">${icon("usb")}</span><div><strong>Xpenology USB</strong><small>${esc(t("app_subtitle"))}</small></div></div>
     <div class="header-tools"><button class="theme-button" data-theme="1" aria-label="${esc(t("theme_next", t(`theme_${theme}`), t(`theme_${theme === "system" ? "light" : theme === "light" ? "dark" : "system"}`)))}" title="${esc(t(`theme_${theme}`))}">${icon(theme === "system" ? "monitor" : theme === "dark" ? "moon" : "sun")}<span>${esc(t(`theme_${theme}`))}</span></button>
-    <div class="lang" role="group" aria-label="Language"><button data-lang="ko" aria-pressed="${getLang() === "ko"}">한국어</button><button data-lang="en" aria-pressed="${getLang() === "en"}">EN</button></div></div></header>`;
+    <div class="lang" role="group" aria-label="Language"><button data-lang="ko" aria-pressed="${getLang() === "ko"}">한국어</button><button data-lang="en" aria-pressed="${getLang() === "en"}">EN</button></div><button class="refresh diagnostic-button" data-copy-diagnostics="1" title="${esc(t("diagnostics_copy"))}" aria-label="${esc(t("diagnostics_copy"))}">${icon("file")}</button></div></header>`;
   const content =
     state.mode === "home"
       ? homeScreen()
@@ -687,7 +727,8 @@ function render() {
             state.mode === "clone" ? cloneScreen() : burnScreen();
           return `${body}<footer>${foot}</footer>`;
         })();
-  app.innerHTML = `${banner}${header}${content}`;
+  const dialog = state.closeBlocked ? `<dialog class="close-dialog" aria-labelledby="close-title"><h2 id="close-title">${esc(t("close_title"))}</h2><p>${esc(t("close_body"))}</p><div><button class="ghost" data-continue="1" autofocus>${esc(t("close_continue"))}</button><button class="cta danger" data-exit="1">${esc(t("close_stop"))}</button></div></dialog>` : "";
+  app.innerHTML = `${banner}${header}${content}${dialog}`;
   const title = app.querySelector<HTMLElement>("h1");
   title?.setAttribute("tabindex", "-1");
   if (screen !== lastScreen) {
@@ -702,6 +743,9 @@ function render() {
         ?.focus({ preventScroll: true });
   }
   lastScreen = screen;
+  const closeDialog = app.querySelector<HTMLDialogElement>("dialog");
+  closeDialog?.showModal?.();
+  closeDialog?.addEventListener("cancel", (event) => { event.preventDefault(); state.closeBlocked = false; render(); });
   warnUnhandledActions();
 }
 
@@ -730,6 +774,30 @@ function warnUnhandledActions() {
 app.addEventListener("click", (e) => {
   const el = (e.target as HTMLElement).closest<HTMLElement>(ACTION_SELECTOR);
   if (!el || !app.contains(el) || el.matches(":disabled")) return;
+  if (state.imageLoading && state.sourceKind === "local" &&
+      (el.dataset.mode || el.dataset.back || el.dataset.go || el.dataset.source)) return;
+  if (el.dataset.continue) { state.closeBlocked = false; render(); return; }
+  if (el.dataset.exit) {
+    state.closeBlocked = false;
+    state.canceling = true;
+    void invoke("request_exit").catch(() => { state.canceling = false; state.closeBlocked = true; render(); });
+    render(); return;
+  }
+  if (el.dataset.source) {
+    imageRequest++;
+    state.sourceKind = el.dataset.source as "online" | "local";
+    state.imageLoading = false;
+    state.imageError = null;
+    if (state.sourceKind === "online") void fetchImages();
+    render(); return;
+  }
+  if (el.dataset.pickImage) { void pickImage(); return; }
+  if (el.dataset.reloadImages) { void fetchImages(); return; }
+  if (el.dataset.clearCache) {
+    state.cacheMessage = "";
+    void (isBrowserPreview() ? Promise.resolve() : invoke("clear_cache")).then(() => { state.cacheMessage = t("cache_cleared"); render(); }).catch((e) => { state.cacheMessage = t("err_" + normalizeFailure(e).code); render(); });
+    return;
+  }
   if (el.dataset.theme) {
     theme =
       theme === "system" ? "light" : theme === "light" ? "dark" : "system";
@@ -741,15 +809,16 @@ app.addEventListener("click", (e) => {
     render();
     return;
   }
-  if (el.dataset.copyError) {
+  if (el.dataset.copyError || el.dataset.copyDiagnostics) {
     if (!navigator.clipboard) {
       el.textContent = t("copy_failed");
       return;
     }
     void navigator.clipboard
-      .writeText(state.failure?.detail ?? "")
+      .writeText(diagnosticText())
       .then(() => {
         state.copied = true;
+        if (el.dataset.copyDiagnostics) { el.title = t("copied"); el.setAttribute("aria-label", t("copied")); return; }
         render();
       })
       .catch(() => {
@@ -795,7 +864,7 @@ app.addEventListener("click", (e) => {
   } else if (el.dataset.disk) {
     const n = Number(el.dataset.disk);
     if (state.mode === "clone") {
-      // 복제는 고르는 즉시 다음 단계로 간다. pickCloneDisk 가 직접 그린다.
+      // Selection stays on this step until the user presses Next.
       void pickCloneDisk(n);
       return;
     }
@@ -804,13 +873,18 @@ app.addEventListener("click", (e) => {
       state.disks.find((d) => d.number === n)?.selection_id ?? null;
   } else if (el.dataset.loader) {
     state.loader = el.dataset.loader as LoaderId;
+    void fetchImages();
   } else if (el.dataset.lang) {
     setLang(el.dataset.lang as Lang);
   } else if (el.dataset.go) {
     const next = Number(el.dataset.go) as Step;
+    if (state.mode === "burn" && next === 3 && !imageReady()) return;
+    if (state.mode === "clone" && ((next === 2 && !state.sourceId) || (next === 3 && !state.targetId))) return;
     if (next === 4 && !canStart()) return;
     if (next === 3) state.acknowledged = false;
     state.step = next;
+    if (state.mode === "burn" && next === 2 && state.sourceKind === "online") void fetchImages();
+    if (state.mode === "clone" && next === 3) void analyzeClone();
     if (next === 4) {
       if (state.mode === "clone") void startClone();
       else void startWrite();
@@ -841,10 +915,17 @@ app.addEventListener("change", (e) => {
   if (el instanceof HTMLInputElement && el.hasAttribute("data-verify")) {
     state.verify = el.checked;
   }
+  if (el instanceof HTMLInputElement && el.hasAttribute("data-cache")) state.useCache = el.checked;
+  if (el instanceof HTMLSelectElement && el.hasAttribute("data-version")) {
+    state.imageId = el.value;
+    state.acknowledged = false;
+    render();
+  }
 });
 
 /** 갈래를 시작한다. 시작 화면으로 돌아가는 것도 여기를 지난다. */
 function startMode(mode: Mode) {
+  imageRequest++;
   state.mode = mode;
   state.acknowledged = false;
   state.canceling = false;
@@ -866,6 +947,13 @@ function startMode(mode: Mode) {
   state.summary = null;
   state.cloneSummary = null;
   state.eject = null;
+  state.ejectError = "";
+  state.sourceKind = "online";
+  state.images = [];
+  state.imageId = null;
+  state.imageError = null;
+  state.imageLoading = false;
+  state.localImage = null;
   render();
   if (mode !== "home") void refreshDisks();
 }
@@ -881,7 +969,6 @@ async function pickCloneDisk(n: number) {
     state.source = n;
     state.sourceId =
       state.disks.find((d) => d.number === n)?.selection_id ?? null;
-    state.step = 2;
     render();
     return;
   }
@@ -890,6 +977,10 @@ async function pickCloneDisk(n: number) {
   state.target = n;
   state.targetId =
     state.disks.find((d) => d.number === n)?.selection_id ?? null;
+  render();
+}
+
+async function analyzeClone() {
   state.step = 3;
   state.plan = null;
   render(); // 먼저 "원본을 살펴보는 중" 을 보여준다
@@ -936,12 +1027,14 @@ async function startWrite() {
   state.failure = null;
 
   if (isBrowserPreview()) {
+    const image = chosenImage();
+    const local = state.sourceKind === "local" ? state.localImage : null;
     simulate(plannedStages(), () => {
       state.summary = {
-        loader: "m-shell",
-        tag: "v1.4.2.8",
-        asset_name: "alpine-redpill.v1.4.2.8.m-shell-5GB.img.gz",
-        bytes_written: 4_978_638_848,
+        loader: local ? "Local" : state.loader,
+        tag: local ? "" : image?.tag ?? "",
+        asset_name: local?.name ?? image?.asset_name ?? "",
+        bytes_written: local?.size_bytes ?? 4_978_638_848,
         verified: state.verify,
       };
     });
@@ -959,10 +1052,12 @@ async function startWrite() {
     // A cancellation during event subscription must not start a new backend job.
     if (state.canceling) throw new Error("Canceled");
 
-    state.summary = await invoke<RunSummary>("write_image", {
+    state.summary = state.sourceKind === "local" ? await invoke<RunSummary>("write_local_image", { selectionId: state.selectionId, verify: state.verify }) : await invoke<RunSummary>("write_image", {
       selectionId: state.selectionId,
       loader: state.loader,
       verify: state.verify,
+      imageId: state.imageId,
+      useCache: state.useCache,
     });
     state.step = 5;
   } catch (err) {
@@ -1027,6 +1122,7 @@ async function startClone() {
  * 있는 것만 골라낸다. 나머지는 굽기와 같은 해석기에 맡긴다.
  */
 function cloneFailure(err: unknown): Failure {
+  if (err && typeof err === "object") return normalizeFailure(err);
   const s = typeof err === "string" ? err : JSON.stringify(err);
   if (s.includes("Gpt")) return { code: "layout_gpt" };
   if (s.includes("NoSignature") || s.includes("NoPartitions")) {
@@ -1046,6 +1142,7 @@ async function doEject() {
   const diskNumber = ejectTarget();
   if (state.eject === "busy" || diskNumber == null) return;
   state.eject = "busy";
+  state.ejectError = "";
   render();
 
   if (isBrowserPreview()) {
@@ -1057,10 +1154,12 @@ async function doEject() {
   }
 
   try {
-    await invoke("eject_disk", { diskNumber });
+    await invoke("eject_disk", { selectionId: state.mode === "clone" ? state.targetId : state.selectionId });
     state.eject = "ok";
-  } catch {
+  } catch (err) {
     state.eject = "fail";
+    const failure = normalizeFailure(err);
+    state.ejectError = [t("err_" + failure.code), failure.detail].filter(Boolean).join(" · ");
   }
   render();
 }
@@ -1265,6 +1364,10 @@ function startAutoScan() {
 }
 
 async function boot() {
+  if (!isBrowserPreview()) {
+    void invoke<Record<string, string>>("diagnostics").then((data) => { state.diagnostic = data ?? {}; }).catch(() => {});
+    void listen("close-blocked", () => { state.closeBlocked = true; render(); }).catch(() => {});
+  } else state.diagnostic = { app_version: "0.5.0", os: "Browser preview", arch: "simulated" };
   try {
     if (isBrowserPreview()) {
       state.simulated = true;
@@ -1286,6 +1389,65 @@ async function boot() {
     render();
   }
   startAutoScan();
+}
+
+let imageRequest = 0;
+
+async function fetchImages() {
+  const request = ++imageRequest;
+  const loader = state.loader;
+  state.imageLoading = true;
+  state.imageError = null;
+  state.images = [];
+  state.imageId = null;
+  render();
+  try {
+    const images = isBrowserPreview() ? [
+      { id: `${loader}-latest`, tag: "v1.4.2.8", asset_name: loader === "MShell" ? "alpine-redpill.m-shell-5GB.img.gz" : "rr-26.8.0.img.zip", size_bytes: 605_888_202, checksum: loader === "Rr" },
+      { id: `${loader}-previous`, tag: "v1.4.2.7", asset_name: loader === "MShell" ? "alpine-redpill.m-shell.img.gz" : "rr-26.7.0.img.zip", size_bytes: 588_000_000, checksum: loader === "Rr" },
+    ] : await invoke<ImageEntry[]>("release_images", { loader });
+    if (request !== imageRequest || state.loader !== loader || state.sourceKind !== "online") return;
+    if (!images?.length) throw { code: "network", detail: "No release images" };
+    state.images = images;
+    state.imageId = images[0].id;
+  } catch (error) {
+    if (request === imageRequest) state.imageError = normalizeFailure(error);
+  } finally {
+    if (request === imageRequest) { state.imageLoading = false; render(); }
+  }
+}
+
+async function pickImage() {
+  if (state.imageLoading) return;
+  state.imageLoading = true;
+  state.imageError = null;
+  state.canceling = false;
+  render();
+  try {
+    const selected = isBrowserPreview() ? { name: "bootloader.img", size_bytes: 4_978_638_848 } : await invoke<LocalEntry | null>("pick_local_image");
+    if (selected) state.localImage = selected;
+  } catch (error) { state.imageError = normalizeFailure(error); }
+  finally { state.imageLoading = false; state.canceling = false; render(); }
+}
+
+function diagnosticText(): string {
+  const target = targetDisk();
+  const image = chosenImage();
+  return JSON.stringify({
+    ...state.diagnostic,
+    mode: state.mode,
+    step: state.step,
+    stage: state.progress?.stage ?? null,
+    target: target ? { number: target.number, name: target.name, size_bytes: target.size_bytes } : null,
+    source_number: state.source,
+    loader: state.sourceKind === "local" ? "Local" : state.loader,
+    image: state.sourceKind === "local" ? state.localImage?.name : image?.asset_name,
+    version: image?.tag,
+    verify: state.verify,
+    failure: state.failure ?? state.imageError,
+    eject_error: state.ejectError || null,
+    time: new Date().toISOString(),
+  }, null, 2);
 }
 
 boot();

@@ -15,6 +15,11 @@
 //! `CM_Request_Device_Eject` 다. 디스크가 아니라 **그 부모인 USB 장치**를
 //! 대상으로 해야 한다. 디스크 자체를 꺼내려 하면 거부된다.
 
+use super::ioctl;
+use crate::core::{
+    model::{BusType, DiskInfo},
+    safety,
+};
 use crate::device::DeviceError;
 use windows::core::PCWSTR;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
@@ -46,8 +51,8 @@ struct StorageDeviceNumber {
 ///
 /// 디스크 인터페이스를 훑어 해당 번호의 장치를 찾고, 그 **부모** 장치 노드에
 /// 제거를 요청한다. 부모가 USB 장치이고, 그것을 꺼내야 윈도우가 장치를 놓아준다.
-pub fn request_eject(disk_number: u32) -> Result<(), DeviceError> {
-    let devinst = find_parent_devinst(disk_number)?;
+pub fn request_eject(disk: &DiskInfo) -> Result<(), DeviceError> {
+    let devinst = find_parent_devinst(disk)?;
 
     let mut veto_type = PNP_VETO_TYPE::default();
     let mut veto_name = [0u16; MAX_PATH as usize];
@@ -75,7 +80,8 @@ pub fn request_eject(disk_number: u32) -> Result<(), DeviceError> {
 }
 
 /// 디스크 번호에 해당하는 장치의 **부모** 노드를 찾는다.
-fn find_parent_devinst(disk_number: u32) -> Result<u32, DeviceError> {
+fn find_parent_devinst(disk: &DiskInfo) -> Result<u32, DeviceError> {
+    let disk_number = disk.number;
     // 안전성: 클래스 GUID 는 유효하고, 반환된 목록은 아래에서 반드시 해제한다.
     let set = unsafe {
         SetupDiGetClassDevsW(
@@ -138,6 +144,31 @@ fn find_parent_devinst(disk_number: u32) -> Result<u32, DeviceError> {
         let path = unsafe { PCWSTR((*detail).DevicePath.as_ptr()) };
         if device_number_of(path) != Some(disk_number) {
             continue;
+        }
+
+        // Bind the PnP node to the selected device immediately before ejecting it.
+        let verified = (|| -> Result<(), DeviceError> {
+            let interface =
+                unsafe { path.to_string() }.map_err(|e| DeviceError::IdentityChanged {
+                    message: e.to_string(),
+                })?;
+            let handle = ioctl::get_handle(&interface, false, false, "Eject identity")?;
+            let descriptor = ioctl::query_device_descriptor(&handle)?;
+            let mut observed = disk.clone();
+            observed.number = ioctl::query_device_number(&handle)?;
+            observed.size_bytes = ioctl::query_length(&handle)?;
+            observed.friendly_name = descriptor.friendly_name();
+            observed.serial = descriptor.serial;
+            observed.bus_type = BusType::from(descriptor.bus_type);
+            safety::confirm_identity(disk, &observed).map_err(|e| DeviceError::IdentityChanged {
+                message: e.describe(),
+            })
+        })();
+        if let Err(error) = verified {
+            unsafe {
+                let _ = SetupDiDestroyDeviceInfoList(set);
+            }
+            return Err(error);
         }
 
         // 부모(대개 USB 장치)를 얻는다. 디스크 자체는 꺼낼 수 없다.

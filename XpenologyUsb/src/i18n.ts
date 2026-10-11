@@ -10,6 +10,35 @@ export type Lang = "ko" | "en";
 type Dict = Record<string, string>;
 
 const ko: Dict = {
+  source_online: "온라인 로더",
+  latest: "최신",
+  source_local: "로컬 이미지",
+  image_version: "버전",
+  image_loading: "이미지 정보를 확인하고 있습니다…",
+  image_pick: "이미지 파일 선택",
+  image_ready: "이미지 확인 완료",
+  image_checking: "이미지 확인 중…",
+  checksum_yes: "발행자 SHA-256 제공",
+  checksum_no: "발행자 체크섬 미제공",
+  local_checksum: "로컬 이미지 · 발행자 검증 없음",
+  cache_use: "다운로드 캐시 사용",
+  cache_clear: "다운로드 캐시 지우기",
+  cache_cleared: "캐시를 지웠습니다",
+  cache_hint: "최대 4 GiB · 재사용 시 해시 확인",
+  diagnostics_copy: "진단 정보 복사",
+  close_title: "작업이 진행 중입니다",
+  close_body: "중단하면 USB가 불완전한 상태로 남을 수 있습니다. USB를 분리하지 마세요.",
+  close_continue: "계속 작업",
+  close_stop: "중단 후 종료",
+  erased_notice: "대상 USB가 이미 변경되었습니다. 사용하려면 처음부터 다시 기록해야 합니다.",
+  written_unverified: "기록 완료 · 검증 미실행",
+  written_verified: "기록 및 검증 완료",
+  err_image_invalid: "이미지를 사용할 수 없습니다",
+  err_image_invalid_why: "이미지 파일의 형식과 여유 공간을 확인한 뒤 다시 선택해 주세요.",
+  err_rejected: "이 USB에 기록할 수 없습니다",
+  err_rejected_why: "용량을 확인하고, 이미지 파일이 저장된 USB와 다른 대상을 선택해 주세요.",
+  err_busy: "다른 작업이 진행 중입니다",
+  err_busy_why: "현재 작업이 끝날 때까지 기다려 주세요.",
   hero_tag: "설치부터 복제까지",
   hero_caption: "하나의 USB, 새로운 시작",
   choice_label: "어떤 작업을 할까요?",
@@ -28,7 +57,7 @@ const ko: Dict = {
   read_only_status: "읽기 전용",
 
   home_eyebrow: "XPENOLOGY USB WRITER",
-  home_title: "부팅 USB 준비,\n한 곳에서 간편하게.",
+  home_title: "Xpenology USB",
   home_lead: "새 로더를 설치하거나, 사용 중인 부팅 USB를 복제하세요.",
   home_requirements: "Windows · 8GB 이상 USB · 관리자 권한",
   home_burn_action: "새 USB 만들기",
@@ -167,16 +196,16 @@ const ko: Dict = {
   // USB 가 멀쩡하다는 전제에서만 맞는데, 이 USB 는 이미 비어 있어서 탐색기에
   // 뜨지도 않는다. 그 상태로 그 안내를 보여주면 사용자는 프로그램이 자기 USB 를
   // 망가뜨려 놓고 남 탓을 한다고 읽는다.
-  err_target_erased: "USB를 준비하다 중단됐습니다",
+  err_target_erased: "대상 USB 작업이 중단됐습니다",
   err_target_erased_why:
-    '이 USB의 원래 내용은 이미 지워진 뒤라 되돌릴 수 없습니다. 탐색기에서는 빈 장치로 보이거나 "포맷하시겠습니까"를 물어볼 수 있는데, 그건 고장이 아닙니다. USB를 뽑았다 다시 꽂고 「다시 시도」를 누르면 이어서 끝납니다. 중단된 이유는 아래에 있습니다.',
+    '대상 USB의 파티션이나 데이터가 변경되었습니다. 부팅하려면 처음부터 다시 기록해야 합니다. Windows의 포맷 요청은 취소해 주세요.',
   // 쓰기는 끝까지 끝났는데 되읽은 내용이 다른 경우. `target_erased` 와 반드시
   // 구분한다 — 저건 "준비하다 멈췄다" 이고 이건 "다 썼는데 대조가 어긋났다" 다.
   // 사용자가 할 일도 다르다. 이 경우 USB 는 완전히 쓰인 상태이므로, 되꽂아
   // 이어서 하라는 안내가 아니라 **그 USB 를 믿지 말라**는 안내가 맞다.
   err_verify_mismatch: "되읽은 내용이 쓴 것과 다릅니다",
   err_verify_mismatch_why:
-    "이미지는 끝까지 쓰였지만, 다시 읽어 대조해 보니 일부가 달랐습니다. USB 가 쓰기를 받아들인 척하고 실제로는 저장하지 않는 경우에 이렇게 됩니다. 이 USB 로는 부팅되지 않을 수 있으니 그대로 쓰지 마시고, 다른 USB 나 다른 포트로 다시 구워 보세요. 같은 USB 에서 계속 이러면 그 USB 의 수명이 다한 것입니다.",
+    "기록한 내용과 되읽은 내용이 일치하지 않습니다. 매체·연결·드라이버 또는 다른 프로그램의 쓰기가 원인일 수 있습니다. 상세 정보를 확인하고 다른 포트나 USB로 다시 시도해 주세요.",
   verify_at_head:
     "어긋난 곳은 맨 앞 1MiB — 파티션 테이블이 있는 구간입니다. 이 위치는 USB 불량보다 윈도우가 그 구간을 건드렸을 때 나옵니다. 제보해 주시면 도움이 됩니다.",
   verify_at_offset: "처음 어긋난 위치: {0} 지점 (오프셋 {1})",
@@ -231,6 +260,35 @@ const ko: Dict = {
 };
 
 const en: Dict = {
+  source_online: "Online loader",
+  latest: "Latest",
+  source_local: "Local image",
+  image_version: "Version",
+  image_loading: "Checking image information…",
+  image_pick: "Choose image file",
+  image_ready: "Image checked",
+  image_checking: "Checking image…",
+  checksum_yes: "Publisher SHA-256 available",
+  checksum_no: "No publisher checksum",
+  local_checksum: "Local image · publisher not verified",
+  cache_use: "Use download cache",
+  cache_clear: "Clear download cache",
+  cache_cleared: "Cache cleared",
+  cache_hint: "Up to 4 GiB · hash checked on reuse",
+  diagnostics_copy: "Copy diagnostics",
+  close_title: "An operation is running",
+  close_body: "Stopping may leave an incomplete USB. Keep the drive connected.",
+  close_continue: "Keep running",
+  close_stop: "Stop and exit",
+  erased_notice: "The target USB has already changed. Write it again from the beginning before use.",
+  written_unverified: "Written · not verified",
+  written_verified: "Written and verified",
+  err_image_invalid: "Cannot use this image",
+  err_image_invalid_why: "Check the image format and free disk space, then select it again.",
+  err_rejected: "Cannot write to this drive",
+  err_rejected_why: "Check its capacity and select a target different from the drive holding the image.",
+  err_busy: "Another operation is running",
+  err_busy_why: "Wait for the current operation to finish.",
   hero_tag: "CREATE · CLONE · READY",
   hero_caption: "One drive. A fresh start.",
   choice_label: "What would you like to do?",
@@ -383,12 +441,12 @@ const en: Dict = {
   err_identity_changed: "This is a different device",
   err_identity_changed_why:
     "The drive no longer matches the one you selected. What differs is shown below.",
-  err_target_erased: "Stopped while preparing the drive",
+  err_target_erased: "Target drive operation stopped",
   err_target_erased_why:
-    "This drive's original contents are already gone and cannot be recovered. Explorer may show it as empty or offer to format it -- that is expected, not a fault. Unplug it, plug it back in, and press Try again to finish. The reason it stopped is shown below.",
+    "The target drive's partitions or data have changed. Write it again from the beginning before booting. Cancel any Windows format prompt.",
   err_verify_mismatch: "The drive read back differently",
   err_verify_mismatch_why:
-    "The image was written all the way through, but reading it back found bytes that do not match. That happens when a drive accepts a write and quietly does not store it. This drive may not boot, so do not rely on it -- try burning again on a different drive or a different port. If the same drive keeps doing this, it has worn out.",
+    "Written and read-back bytes do not match. The drive, connection, driver or another program may be responsible. Check the details and try another port or drive.",
   verify_at_head:
     "The mismatch is in the first 1 MiB, where the partition table lives. That location points at something else touching the drive rather than at a faulty stick. Please report it.",
   verify_at_offset: "First mismatch at {0} (offset {1})",

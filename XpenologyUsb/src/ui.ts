@@ -10,6 +10,7 @@
  */
 
 import { reasonText, t } from "./i18n";
+import { createElement, Usb, Copy, ArrowRight, ShieldCheck, Sun, Moon, Monitor, Check, Download, TriangleAlert, RefreshCw, FolderOpen, Trash2, FileText } from "lucide";
 
 export type DiskEntry = {
   number: number;
@@ -49,7 +50,7 @@ export type ProgressEvent = {
   detail: string | null;
 };
 
-export type Failure = { code: string; detail?: string };
+export type Failure = { code: string; detail?: string; target_erased?: boolean; raw?: string };
 
 export function fmtBytes(n: number): string {
   const u = ["B", "KB", "MB", "GB", "TB"];
@@ -91,6 +92,13 @@ export const ACTIONS = [
   "data-back",
   "data-theme",
   "data-copy-error",
+  "data-source",
+  "data-pick-image",
+  "data-reload-images",
+  "data-clear-cache",
+  "data-copy-diagnostics",
+  "data-continue",
+  "data-exit",
 ] as const;
 
 export const ACTION_SELECTOR = ACTIONS.map((a) => `[${a}]`).join(",");
@@ -107,7 +115,7 @@ export function esc(s: string): string {
 
 /** 줄바꿈을 <br> 로. 제목에만 쓴다. */
 export function nl(s: string): string {
-  return esc(s).replace(/\n/g, "<br>");
+  return esc(s).replace(/\n/g, " ");
 }
 
 /** `total` 은 단계 수. 흐름마다 다르다. */
@@ -122,24 +130,14 @@ export function icon(
     | "monitor"
     | "check"
     | "download"
-    | "warning",
+    | "warning"
+    | "refresh"
+    | "folder"
+    | "trash"
+    | "file",
 ): string {
-  const paths = {
-    moon: '<path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z"/>',
-    monitor:
-      '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/>',
-    download: '<path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>',
-    warning: '<path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v5m0 3v1"/>',
-
-    usb: '<rect x="7" y="8" width="10" height="13" rx="3"/><path d="M9 8V3h6v5M10 4v2m4-2v2M10 17h4"/>',
-    copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v13h5"/>',
-    arrow: '<path d="M4 12h15m-6-6 6 6-6 6"/>',
-    shield:
-      '<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/>',
-    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1 1m12 12 1 1M5 19l1-1M18 6l1-1"/>',
-    check: '<path d="m5 12 4 4L19 6"/>',
-  };
-  return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]}</svg>`;
+  const nodes = { usb: Usb, copy: Copy, arrow: ArrowRight, shield: ShieldCheck, sun: Sun, moon: Moon, monitor: Monitor, check: Check, download: Download, warning: TriangleAlert, refresh: RefreshCw, folder: FolderOpen, trash: Trash2, file: FileText };
+  return createElement(nodes[name], { class: "icon", "aria-hidden": "true", "stroke-width": 1.7 }).outerHTML;
 }
 
 export function segs(
@@ -209,6 +207,10 @@ export function ejectBlock(status: EjectStatus): string {
  * 사용자도 나도 원인을 알 수 없다.
  */
 export function normalizeFailure(err: unknown): Failure {
+  if (err && typeof err === "object" && "code" in err && typeof err.code === "string") {
+    const failure = err as Failure;
+    return { code: failure.code, detail: failure.code === "verify_mismatch" ? cleanDetail(failure.detail ?? "") : failure.detail, target_erased: !!failure.target_erased, raw: JSON.stringify(err) };
+  }
   const s = typeof err === "string" ? err : JSON.stringify(err);
   // **순서가 의미를 가진다.** 위에 있는 것이 이긴다.
   //
@@ -231,6 +233,9 @@ export function normalizeFailure(err: unknown): Failure {
     WriteDenied: "write_denied",
     MediaChanged: "media_changed",
     IdentityChanged: "identity_changed",
+    Download: "network",
+    Resolve: "network",
+    Extract: "image_invalid",
   };
 
   // 백엔드가 코드 5 로 감싼 쓰기 거부. 준비 상태가 메시지에 들어 있다.
