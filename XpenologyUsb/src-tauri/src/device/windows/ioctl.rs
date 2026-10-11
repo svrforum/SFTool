@@ -715,6 +715,27 @@ fn drive_prefix(p: &Path) -> Option<String> {
     Some(format!(r"\\.\{}:", c.to_ascii_uppercase()))
 }
 
+pub fn disks_for_path(path: &Path) -> Result<HashSet<u32>, DeviceError> {
+    use windows::Win32::Storage::FileSystem::{
+        GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+    };
+    let input = wide(&path.to_string_lossy());
+    let mut root = vec![0u16; 32768];
+    // Both buffers are valid UTF-16 output arrays for the duration of the calls.
+    unsafe { GetVolumePathNameW(PCWSTR(input.as_ptr()), &mut root) }
+        .map_err(|_| last_error_in("Source volume"))?;
+    let mut guid = vec![0u16; 1024];
+    unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(root.as_ptr()), &mut guid) }
+        .map_err(|_| last_error_in("Source volume identity"))?;
+    let end = guid.iter().position(|v| *v == 0).unwrap_or(guid.len());
+    let guid = String::from_utf16_lossy(&guid[..end]);
+    let handle = open_volume_for_query(guid.trim_end_matches('\\'))?;
+    Ok(volume_disk_numbers(&handle)?
+        .into_iter()
+        .map(|(number, _)| number)
+        .collect())
+}
+
 // ---------------------------------------------------------------------------
 // 쓰기 경로
 // ---------------------------------------------------------------------------

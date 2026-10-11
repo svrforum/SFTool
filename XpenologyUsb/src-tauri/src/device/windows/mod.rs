@@ -20,6 +20,7 @@ mod ioctl;
 mod raw;
 mod read;
 
+pub use ioctl::disks_for_path;
 pub use raw::WindowsRawWriter;
 pub use read::WindowsRawReader;
 
@@ -28,13 +29,13 @@ pub use read::WindowsRawReader;
 /// 볼륨 관리자에게 미디어 제거를 허용시킨 뒤 꺼내기를 요청한다.
 /// 실패하면 그 이유를 그대로 올린다 — 대개 무언가 아직 장치를 붙잡고 있다는 뜻이라
 /// 사용자가 탐색기 창을 닫고 다시 시도하면 된다.
-pub fn eject(disk_number: u32) -> Result<(), DeviceError> {
+pub fn eject(disk: &DiskInfo) -> Result<(), DeviceError> {
     // 먼저 볼륨 관리자에게 제거를 허용시킨다. 실패해도 다음 단계를 막지 않는다.
-    if let Ok(h) = ioctl::open_physical(disk_number, false, false) {
+    if let Ok(h) = ioctl::open_physical(disk.number, false, false) {
         ioctl::allow_media_removal(&h);
     }
     // 실제 안전 제거. USB 스틱은 미디어 꺼내기가 아니라 장치 제거여야 한다.
-    eject::request_eject(disk_number)
+    eject::request_eject(disk)
 }
 
 use super::{DeviceError, UsbEnumerator};

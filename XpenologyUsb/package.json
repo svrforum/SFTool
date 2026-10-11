@@ -1,7 +1,7 @@
 {
   "name": "xpenologyusb",
   "private": true,
-  "version": "0.4.6",
+  "version": "0.5.0",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -14,7 +14,8 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "lucide": "^1.54.0"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
