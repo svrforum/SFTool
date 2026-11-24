@@ -74,15 +74,24 @@ fn reader() -> Box<dyn device::RawReader> {
     {
         // 개발 환경에서는 파티션이 하나 있는 가짜 원본을 돌려준다.
         // UI 흐름을 끝까지 눌러볼 수 있으면서 개발자의 디스크는 안전하다.
-        let mut img = vec![0x5Au8; 16 * 1024 * 1024];
-        img[..512].fill(0);
-        img[446 + 4] = 0x83;
-        img[446 + 8..446 + 12].copy_from_slice(&2048u32.to_le_bytes());
-        img[446 + 12..446 + 16].copy_from_slice(&14336u32.to_le_bytes());
-        img[510] = 0x55;
-        img[511] = 0xAA;
-        Box::new(device::fake::FakeReader::new(img, 512))
+        Box::new(sample_source())
     }
+}
+
+/// 파티션이 하나 있는 16 MiB 가짜 원본.
+///
+/// 개발 환경의 `reader()` 와 테스트가 함께 쓴다. 테스트는 `reader()` 를 쓰면
+/// 안 된다 — Windows 에서는 그것이 실제 `\\.\PhysicalDriveN` 을 연다.
+#[cfg(any(test, not(windows)))]
+fn sample_source() -> device::fake::FakeReader {
+    let mut img = vec![0x5Au8; 16 * 1024 * 1024];
+    img[..512].fill(0);
+    img[446 + 4] = 0x83;
+    img[446 + 8..446 + 12].copy_from_slice(&2048u32.to_le_bytes());
+    img[446 + 12..446 + 16].copy_from_slice(&14336u32.to_le_bytes());
+    img[510] = 0x55;
+    img[511] = 0xAA;
+    device::fake::FakeReader::new(img, 512)
 }
 
 /// 취소 플래그.
@@ -177,16 +186,31 @@ fn analyze_source(
     state: tauri::State<'_, AppState>,
     selection_id: String,
 ) -> Result<commands::SourcePlan, Failure> {
-    let enumerator = enumerator();
+    analyze_source_with(
+        &state,
+        &selection_id,
+        enumerator().as_ref(),
+        reader().as_ref(),
+    )
+}
+
+fn analyze_source_with(
+    state: &AppState,
+    selection_id: &str,
+    enumerator: &dyn UsbEnumerator,
+    reader: &dyn device::RawReader,
+) -> Result<commands::SourcePlan, Failure> {
+    // 원본을 여는 것도 장치 작업이다. 굽기·복제와 겹치지 않게 한다.
+    let _operation = state.begin().map_err(|e| Failure::new("busy", e))?;
     let protected = enumerator.protected_disk_numbers().map_err(Failure::from)?;
     let disks = enumerator.list_disks().map_err(Failure::from)?;
     let selected = state
-        .selected(&selection_id)
+        .selected(selection_id)
         .map_err(|e| Failure::new("identity_changed", e))?;
     let disk =
         selection::resolve(&selected, &disks).map_err(|e| Failure::new("identity_changed", e))?;
 
-    core::cloner::analyze(reader().as_ref(), &disk, &protected)
+    core::cloner::analyze(reader, &disk, &protected)
         .map(commands::SourcePlan::from)
         .map_err(Failure::from)
 }
@@ -238,6 +262,24 @@ async fn clone_disk(
     .map_err(|e| Failure::new("generic", format!("Worker: {e}")))?
 }
 
+/// 확인 화면에 띄울 쓰기 전 경고.
+///
+/// 대상을 지우기 **전에** 알 수 있는 위험만 담는다. 판정은
+/// [`core::preflight`] 가 하고, 여기서는 설정을 읽어 넘긴다. 경고는 막는 데
+/// 쓰지 않는다 — 사용자가 이미 허용 목록에 넣었는지는 알 수 없다.
+#[tauri::command]
+fn preflight() -> Vec<&'static str> {
+    #[cfg(windows)]
+    {
+        let (policy, local) = device::windows::controlled_folder_access();
+        core::preflight::warnings(policy, local)
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
 #[tauri::command]
 fn cancel_write(state: tauri::State<'_, AppState>) {
     state.cancel.store(true, Ordering::Relaxed);
@@ -257,16 +299,7 @@ async fn write_image(
     image_id: Option<String>,
     use_cache: Option<bool>,
 ) -> Result<core::runner::RunSummary, Failure> {
-    let loader = match loader.as_str() {
-        "MShell" => Loader::MShell,
-        "Rr" => Loader::Rr,
-        other => {
-            return Err(Failure::new(
-                "image_invalid",
-                format!("Unknown loader: {other}"),
-            ))
-        }
-    };
+    let loader = parse_loader(&loader)?;
 
     let operation = state.begin().map_err(|e| Failure::new("busy", e))?;
     let selected = state
@@ -348,7 +381,10 @@ fn parse_loader(loader: &str) -> Result<Loader, Failure> {
     match loader {
         "MShell" => Ok(Loader::MShell),
         "Rr" => Ok(Loader::Rr),
-        _ => Err(Failure::new("image_invalid", "Unknown loader")),
+        other => Err(Failure::new(
+            "image_invalid",
+            format!("Unknown loader: {other}"),
+        )),
     }
 }
 
@@ -584,6 +620,7 @@ pub fn run() {
             write_local_image,
             clear_cache,
             diagnostics,
+            preflight,
             request_exit
         ])
         .run(tauri::generate_context!())
@@ -603,5 +640,51 @@ mod command_tests {
         drop(first);
         let _second = state.begin().unwrap();
         assert!(!state.cancel.load(Ordering::Relaxed));
+    }
+
+    fn registered_stick(state: &AppState) -> String {
+        let disks = device::fake::FakeEnumerator::sample().list_disks().unwrap();
+        let stick = disks.iter().find(|d| d.number == 2).unwrap();
+        state.selections.lock().unwrap().register(stick)
+    }
+
+    /// 원본 분석도 장치를 연다. 굽기·복제가 도는 동안에는 기다리게 한다.
+    #[test]
+    fn source_analysis_refuses_while_another_job_runs() {
+        let state = AppState::default();
+        let id = registered_stick(&state);
+        let _running = state.begin().unwrap();
+        let err = analyze_source_with(
+            &state,
+            &id,
+            &device::fake::FakeEnumerator::sample(),
+            &sample_source(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "busy");
+    }
+
+    /// 분석이 끝나면 다른 작업을 시작할 수 있어야 한다.
+    #[test]
+    fn source_analysis_releases_the_operation_slot() {
+        let state = AppState::default();
+        let id = registered_stick(&state);
+        analyze_source_with(
+            &state,
+            &id,
+            &device::fake::FakeEnumerator::sample(),
+            &sample_source(),
+        )
+        .unwrap();
+        assert!(state.begin().is_ok());
+    }
+
+    #[test]
+    fn an_unknown_loader_is_named_in_the_error() {
+        let Err(err) = parse_loader("Foo") else {
+            panic!("알 수 없는 로더를 받아들였다");
+        };
+        assert_eq!(err.code, "image_invalid");
+        assert!(err.detail.contains("Foo"), "{}", err.detail);
     }
 }

@@ -59,7 +59,15 @@ pub enum DeviceError {
     /// 시도해 주세요" 가 뜬다. 그 안내는 USB 가 멀쩡하다는 전제에서만 맞다.
     /// 이 시점의 USB 는 파티션 테이블이 이미 지워져 탐색기에 뜨지도 않는다.
     /// `message` 에 지금 상태와 원인과 준비 단계 기록이 함께 들어 있다.
-    TargetErased { code: i32, message: String },
+    ///
+    /// `refused` 는 원인이 장치의 **쓰기 거부**(`WriteDenied`)였는가다. 코드 5 만으로는
+    /// 가릴 수 없다 — 플러시처럼 거부가 아닌 실패도 5 를 들고 올 수 있고, 그것을
+    /// 쓰기 거부로 안내하면 백신을 의심하게 만든다. 원인을 아는 `prep` 만 채운다.
+    TargetErased {
+        code: i32,
+        refused: bool,
+        message: String,
+    },
     /// 그 외 입출력 오류. OS 오류 코드와 설명을 담는다.
     Io { code: i32, message: String },
 }

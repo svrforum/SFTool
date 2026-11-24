@@ -31,6 +31,24 @@ const ko: Dict = {
   close_continue: "계속 작업",
   close_stop: "중단 후 종료",
   erased_notice: "대상 USB가 이미 변경되었습니다. 사용하려면 처음부터 다시 기록해야 합니다.",
+  // 쓰기 전 점검. 지우기 **전에** 알 수 있는 위험만 여기 온다.
+  preflight_cfa_title: "Windows 보안이 쓰기를 막을 수 있습니다",
+  preflight_cfa_body:
+    "'제어된 폴더 액세스'가 켜져 있습니다. 이 기능은 허용되지 않은 프로그램이 USB의 부트 영역에 쓰는 것을 막습니다. 쓰는 도중 막히면 USB가 빈 상태로 남습니다.",
+  preflight_cfa_fix:
+    "Windows 보안 → 바이러스 및 위협 방지 → 랜섬웨어 방지에서 '제어된 폴더 액세스를 통해 앱 허용'으로 이 프로그램을 추가한 뒤 진행해 주세요.",
+  preflight_cfa_ack: "이 프로그램을 허용했거나, 쓰기가 막힐 수 있음을 이해했습니다.",
+  // 대상이 이미 비워진 뒤 멈췄을 때. USB 가 죽었다고 오해하지 않게 한다.
+  recovery_title: "이 USB를 다시 쓰려면",
+  recovery_rewrite: "부팅 USB로 쓰려면 처음부터 다시 구우면 됩니다.",
+  recovery_format: "일반 USB로 되돌리려면 Windows 디스크 관리에서 새 볼륨을 만드세요.",
+  recovery_step_open: "시작 버튼을 마우스 오른쪽 버튼으로 누르고 '디스크 관리'를 엽니다.",
+  recovery_step_find: "'디스크 {0}'의 용량이 {1}인지 확인해, 이 USB가 맞는지 봅니다.",
+  recovery_step_find_any: "용량을 보고 이 USB를 찾습니다. 다른 디스크를 고르지 않도록 주의하세요.",
+  recovery_step_volume:
+    "남은 볼륨이 있으면 '볼륨 삭제'로 지우고, '할당되지 않음' 영역을 마우스 오른쪽 버튼으로 눌러 '새 단순 볼륨'을 만듭니다.",
+  recovery_write_protected:
+    "'미디어가 쓰기 금지되어 있습니다'가 나오면 USB가 고장 나 읽기 전용으로 바뀐 것입니다. 이 경우 소프트웨어로는 되살릴 수 없습니다.",
   written_unverified: "기록 완료 · 검증 미실행",
   written_verified: "기록 및 검증 완료",
   err_image_invalid: "이미지를 사용할 수 없습니다",
@@ -184,7 +202,7 @@ const ko: Dict = {
     "다른 프로그램이 USB를 사용 중일 수 있습니다. 탐색기 창을 닫고 다시 시도해 주세요.",
   err_write_denied: "장치가 쓰기를 거부했습니다",
   err_write_denied_why:
-    "탐색기 창이나 백신이 USB를 붙잡고 있으면 이런 일이 생깁니다. 열려 있는 창을 모두 닫고 USB를 뽑았다 다시 꽂은 뒤 시도해 주세요. 아래에 준비 단계 상태가 함께 표시됩니다.",
+    "Windows 보안의 '제어된 폴더 액세스', 백신, 또는 열려 있는 탐색기 창이 USB 쓰기를 막으면 이런 일이 생깁니다. 제어된 폴더 액세스에서 이 프로그램을 허용하고 열린 창을 닫은 뒤, USB를 뽑았다 다시 꽂고 시도해 주세요. 아래에 준비 단계 상태가 함께 표시됩니다.",
   err_media_changed: "USB가 바뀌었습니다",
   err_media_changed_why:
     "작업 중에 USB가 분리되었거나 교체되었습니다. 다시 꽂고 처음부터 진행해 주세요.",
@@ -281,6 +299,22 @@ const en: Dict = {
   close_continue: "Keep running",
   close_stop: "Stop and exit",
   erased_notice: "The target USB has already changed. Write it again from the beginning before use.",
+  preflight_cfa_title: "Windows Security may block the write",
+  preflight_cfa_body:
+    "Controlled folder access is turned on. It stops programs that are not allowed from writing to a drive's boot area. If it blocks the write partway, the USB drive is left empty.",
+  preflight_cfa_fix:
+    "In Windows Security, open Virus & threat protection → Ransomware protection and add this program with “Allow an app through Controlled folder access” before you continue.",
+  preflight_cfa_ack: "I have allowed this program, or I understand the write may be blocked.",
+  recovery_title: "Using this USB drive again",
+  recovery_rewrite: "To use it as a boot drive, write it again from the beginning.",
+  recovery_format: "To use it as a normal USB drive again, create a new volume in Windows Disk Management.",
+  recovery_step_open: "Right-click the Start button and open Disk Management.",
+  recovery_step_find: "Check by its capacity that “Disk {0}” ({1}) is this USB drive.",
+  recovery_step_find_any: "Find this USB drive by its capacity. Take care not to pick another disk.",
+  recovery_step_volume:
+    "Delete any remaining volumes, then right-click the “Unallocated” space and choose “New Simple Volume”.",
+  recovery_write_protected:
+    "If Windows says the media is write-protected, the drive has failed and switched to read-only. Software cannot bring it back.",
   written_unverified: "Written · not verified",
   written_verified: "Written and verified",
   err_image_invalid: "Cannot use this image",
@@ -434,7 +468,7 @@ const en: Dict = {
     "Another program may be using it. Close any Explorer windows and try again.",
   err_write_denied: "The drive refused the write",
   err_write_denied_why:
-    "This usually means something still holds the drive -- an Explorer window or antivirus. Close any windows using it, unplug and replug the drive, then try again. The preparation details are shown below.",
+    "Controlled folder access in Windows Security, antivirus, or an open Explorer window can block writing to the drive. Allow this program in Controlled folder access, close any windows using the drive, unplug and replug it, then try again. The preparation details are shown below.",
   err_media_changed: "The drive changed",
   err_media_changed_why:
     "It was unplugged or swapped during the operation. Reconnect it and start over.",

@@ -94,6 +94,10 @@ type State = {
   loader: LoaderId;
   verify: boolean;
   acknowledged: boolean;
+  /** 쓰기 전 점검이 돌려준 경고 코드. 있으면 따로 확인을 받는다. */
+  preflight: string[];
+  preflightPending: boolean;
+  riskAcknowledged: boolean;
   canceling: boolean;
   cancelError: boolean;
   copied: boolean;
@@ -156,6 +160,9 @@ const state: State = {
   // 같으므로 기본 경로는 잡히지 않는다.
   verify: false,
   acknowledged: false,
+  preflight: [],
+  preflightPending: false,
+  riskAcknowledged: false,
   canceling: false,
   cancelError: false,
   copied: false,
@@ -280,6 +287,8 @@ function canStart(): boolean {
   const disk = targetDisk();
   return (
     state.acknowledged &&
+    !state.preflightPending &&
+    (state.preflight.length === 0 || state.riskAcknowledged) &&
     !!disk?.ready &&
     (state.mode !== "burn" || (imageReady() && (!state.localImage || state.sourceKind !== "local" || state.localImage.size_bytes <= disk.size_bytes))) &&
     (state.mode !== "clone" ||
@@ -308,8 +317,21 @@ function imageControls(): string {
     ${state.imageError ? `<div class="inline-error" role="alert">${esc(t("err_" + state.imageError.code))}<details><summary>${esc(t("error_details"))}</summary><pre>${esc(state.imageError.detail ?? "")}</pre></details></div>` : ""}
     ${state.sourceKind === "online" ? `<div class="cache-row"><label class="check"><input type="checkbox" data-cache="1" ${state.useCache ? "checked" : ""}><span>${esc(t("cache_use"))}</span></label><button class="refresh" data-clear-cache="1" title="${esc(t("cache_clear"))}" aria-label="${esc(t("cache_clear"))}">${icon("trash")}</button></div><p class="small-note" role="status">${esc(state.cacheMessage || t("cache_hint"))}</p>` : ""}`;
 }
+/**
+ * 쓰기 전 점검의 경고.
+ *
+ * 대상을 지우기 **전에** 알 수 있는 위험을 보여주고, 삭제 동의와 따로 확인을
+ * 받는다. 막지는 않는다 — 사용자가 이미 허용 목록에 넣었는지는 알 수 없다.
+ */
+function preflightWarning(): string {
+  if (!state.preflight.includes("controlled_folder_access")) return "";
+  return `<div class="preflight-warning" role="alert">${icon("shield")}<div><strong>${esc(t("preflight_cfa_title"))}</strong>
+    <p>${esc(t("preflight_cfa_body"))}</p><p>${esc(t("preflight_cfa_fix"))}</p></div></div>
+    <label class="check acknowledgement risk"><input type="checkbox" data-risk-ack="1" ${state.riskAcknowledged ? "checked" : ""}>
+    <span>${esc(t("preflight_cfa_ack"))}</span></label>`;
+}
 function confirmationOptions(): string {
-  return `<div class="verify-option"><label class="check"><input type="checkbox" data-verify="1" ${state.verify ? "checked" : ""}>
+  return `${preflightWarning()}<div class="verify-option"><label class="check"><input type="checkbox" data-verify="1" ${state.verify ? "checked" : ""}>
     <span><strong>${esc(t("verify_title"))}</strong><small>${esc(t("verify_hint"))}</small></span></label></div>
     <label class="check acknowledgement"><input type="checkbox" data-ack="1" ${state.acknowledged ? "checked" : ""}>
     <span>${esc(t("erase_ack"))}</span></label>`;
@@ -442,6 +464,25 @@ function doneScreen(
 }
 
 /** 실패 화면. 원인마다 다음에 뭘 해야 하는지 함께 알려준다. */
+/**
+ * 비워진 USB 를 다시 쓰는 방법.
+ *
+ * 파티션 테이블이 지워진 USB 는 탐색기에 보이지 않거나 포맷을 묻는다. 아무 설명
+ * 없이 그 상태를 만나면 사용자는 USB 가 죽었다고 읽는다. 디스크 관리에서 보이는
+ * 번호는 이 프로그램의 디스크 번호와 같으므로 그대로 알려주되, 용량으로 한 번 더
+ * 확인하게 한다 — 그 사이 USB 를 다시 꽂았다면 번호가 바뀌었을 수 있다.
+ */
+function recoveryGuide(): string {
+  const disk = targetDisk();
+  const find = disk
+    ? t("recovery_step_find", String(disk.number), disk.size_label)
+    : t("recovery_step_find_any");
+  return `<details class="recovery" open><summary>${esc(t("recovery_title"))}</summary>
+    <p>${esc(t("recovery_rewrite"))}</p><p>${esc(t("recovery_format"))}</p>
+    <ol><li>${esc(t("recovery_step_open"))}</li><li>${esc(find)}</li><li>${esc(t("recovery_step_volume"))}</li></ol>
+    <p class="small-note">${esc(t("recovery_write_protected"))}</p></details>`;
+}
+
 function errorScreen(): string {
   const f = state.failure;
   const code = f?.code ?? "generic";
@@ -464,7 +505,7 @@ function errorScreen(): string {
       <div class="error-box">
         <div class="what">${esc(what)}</div>
         <div class="why">${esc(why)}</div>
-        ${f?.target_erased ? `<p class="inline-error">${esc(t("erased_notice"))}</p>` : ""}
+        ${f?.target_erased ? `<p class="inline-error">${esc(t("erased_notice"))}</p>${recoveryGuide()}` : ""}
         ${
           f?.detail
             ? `<details class="error-detail"><summary>${esc(t("error_details"))}</summary><pre>${esc(f.detail)}</pre></details>`
@@ -883,6 +924,7 @@ app.addEventListener("click", (e) => {
     if (next === 4 && !canStart()) return;
     if (next === 3) state.acknowledged = false;
     state.step = next;
+    if (next === 3) void runPreflight();
     if (state.mode === "burn" && next === 2 && state.sourceKind === "online") void fetchImages();
     if (state.mode === "clone" && next === 3) void analyzeClone();
     if (next === 4) {
@@ -909,6 +951,11 @@ app.addEventListener("change", (e) => {
   const el = e.target;
   if (el instanceof HTMLInputElement && el.hasAttribute("data-ack")) {
     state.acknowledged = el.checked;
+    const start = app.querySelector<HTMLButtonElement>('[data-go="4"]');
+    if (start) start.disabled = !canStart();
+  }
+  if (el instanceof HTMLInputElement && el.hasAttribute("data-risk-ack")) {
+    state.riskAcknowledged = el.checked;
     const start = app.querySelector<HTMLButtonElement>('[data-go="4"]');
     if (start) start.disabled = !canStart();
   }
@@ -977,6 +1024,34 @@ async function pickCloneDisk(n: number) {
   state.target = n;
   state.targetId =
     state.disks.find((d) => d.number === n)?.selection_id ?? null;
+  render();
+}
+
+let preflightRequest = 0;
+
+/**
+ * 확인 화면을 열 때마다 쓰기 전 점검을 다시 한다.
+ *
+ * 점검이 끝나기 전에는 시작 버튼을 막는다. 응답보다 사용자의 클릭이 빠르면
+ * 경고를 보지 못한 채 지우게 된다. 점검이 실패하면 경고 없이 진행한다 —
+ * 판정할 수 없는 것을 위험으로 바꾸면 모든 사용자가 이유 없는 확인을 누른다.
+ */
+async function runPreflight() {
+  const request = ++preflightRequest;
+  state.preflight = [];
+  state.riskAcknowledged = false;
+  state.preflightPending = true;
+  let warnings: string[] = [];
+  try {
+    const result = isBrowserPreview() ? [] : await invoke<unknown>("preflight");
+    if (Array.isArray(result))
+      warnings = result.filter((w): w is string => typeof w === "string");
+  } catch (e) {
+    console.error("preflight", e);
+  }
+  if (request !== preflightRequest) return;
+  state.preflightPending = false;
+  state.preflight = warnings;
   render();
 }
 
@@ -1367,7 +1442,7 @@ async function boot() {
   if (!isBrowserPreview()) {
     void invoke<Record<string, string>>("diagnostics").then((data) => { state.diagnostic = data ?? {}; }).catch(() => {});
     void listen("close-blocked", () => { state.closeBlocked = true; render(); }).catch(() => {});
-  } else state.diagnostic = { app_version: "0.5.0", os: "Browser preview", arch: "simulated" };
+  } else state.diagnostic = { app_version: "0.5.1", os: "Browser preview", arch: "simulated" };
   try {
     if (isBrowserPreview()) {
       state.simulated = true;

@@ -18,4 +18,5 @@ pub mod source;
 
 pub mod failure;
 pub mod local;
+pub mod preflight;
 pub mod selection;

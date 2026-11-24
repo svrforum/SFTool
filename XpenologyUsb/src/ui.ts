@@ -113,7 +113,7 @@ export function esc(s: string): string {
   );
 }
 
-/** 줄바꿈을 <br> 로. 제목에만 쓴다. */
+/** 제목 문구의 줄바꿈을 공백으로 바꾼다. 줄은 화면 폭에 맞춰 브라우저가 나눈다. 제목에만 쓴다. */
 export function nl(s: string): string {
   return esc(s).replace(/\n/g, " ");
 }

@@ -15,11 +15,13 @@
 //! 오히려 이쪽이 강하다 — 플래그는 값이 없거나 틀릴 수 있지만, "C: 를 담고 있는
 //! 디스크 번호"는 커널이 지금 이 순간 답하는 사실이다.
 
+mod defender;
 mod eject;
 mod ioctl;
 mod raw;
 mod read;
 
+pub use defender::controlled_folder_access;
 pub use ioctl::disks_for_path;
 pub use raw::WindowsRawWriter;
 pub use read::WindowsRawReader;

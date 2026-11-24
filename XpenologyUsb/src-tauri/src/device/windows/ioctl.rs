@@ -829,7 +829,7 @@ pub fn write_raw(
             None,
         )
     }
-    .map_err(|_| last_error_in("장치 쓰기"))?;
+    .map_err(|_| last_error_in(crate::device::prep::DEVICE_WRITE))?;
 
     if written as usize != len {
         return Err(DeviceError::Io {
