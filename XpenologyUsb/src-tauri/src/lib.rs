@@ -74,15 +74,24 @@ fn reader() -> Box<dyn device::RawReader> {
     {
         // 개발 환경에서는 파티션이 하나 있는 가짜 원본을 돌려준다.
         // UI 흐름을 끝까지 눌러볼 수 있으면서 개발자의 디스크는 안전하다.
-        let mut img = vec![0x5Au8; 16 * 1024 * 1024];
-        img[..512].fill(0);
-        img[446 + 4] = 0x83;
-        img[446 + 8..446 + 12].copy_from_slice(&2048u32.to_le_bytes());
-        img[446 + 12..446 + 16].copy_from_slice(&14336u32.to_le_bytes());
-        img[510] = 0x55;
-        img[511] = 0xAA;
-        Box::new(device::fake::FakeReader::new(img, 512))
+        Box::new(sample_source())
     }
+}
+
+/// 파티션이 하나 있는 16 MiB 가짜 원본.
+///
+/// 개발 환경의 `reader()` 와 테스트가 함께 쓴다. 테스트는 `reader()` 를 쓰면
+/// 안 된다 — Windows 에서는 그것이 실제 `\\.\PhysicalDriveN` 을 연다.
+#[cfg(any(test, not(windows)))]
+fn sample_source() -> device::fake::FakeReader {
+    let mut img = vec![0x5Au8; 16 * 1024 * 1024];
+    img[..512].fill(0);
+    img[446 + 4] = 0x83;
+    img[446 + 8..446 + 12].copy_from_slice(&2048u32.to_le_bytes());
+    img[446 + 12..446 + 16].copy_from_slice(&14336u32.to_le_bytes());
+    img[510] = 0x55;
+    img[511] = 0xAA;
+    device::fake::FakeReader::new(img, 512)
 }
 
 /// 취소 플래그.
@@ -649,7 +658,7 @@ mod command_tests {
             &state,
             &id,
             &device::fake::FakeEnumerator::sample(),
-            reader().as_ref(),
+            &sample_source(),
         )
         .unwrap_err();
         assert_eq!(err.code, "busy");
@@ -664,7 +673,7 @@ mod command_tests {
             &state,
             &id,
             &device::fake::FakeEnumerator::sample(),
-            reader().as_ref(),
+            &sample_source(),
         )
         .unwrap();
         assert!(state.begin().is_ok());
