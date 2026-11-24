@@ -33,6 +33,21 @@ const UNMOUNTED: &str = "이 USB 의 드라이브 문자가 떨어진 상태입�
 const PARTIAL: &str = "이 USB 는 파티션 테이블이 지워지고 이미지가 일부만 쓰인 \
      상태입니다. 지금 상태로는 부팅되지 않습니다. 다시 굽기를 실행해 주세요.";
 
+/// 섹터를 실제로 쓰는 Win32 호출의 작업 이름.
+///
+/// 쓰기 거부 판정이 이 이름에 기대므로 `ioctl` 도 이 상수를 쓴다.
+pub const DEVICE_WRITE: &str = "장치 쓰기";
+
+/// 장치가 **섹터 쓰기**를 거부했는가.
+///
+/// Win32 5 는 어느 호출에서 났든 `WriteDenied` 로 온다. 플러시·되읽기·쓰기 금지
+/// 확인까지 쓰기 거부로 보면 화면이 제어된 폴더 액세스나 백신을 의심하게 만든다 —
+/// 이미지를 다 쓴 뒤 플러시만 실패했거나, USB 가 고장 나 읽기 전용이 된 경우에도.
+/// 그래서 실제로 섹터를 쓴 호출만 센다. 모르는 작업은 거부로 보지 않는다.
+fn is_write_refusal(e: &DeviceError) -> bool {
+    matches!(e, DeviceError::WriteDenied { op } if *op == DEVICE_WRITE)
+}
+
 /// 준비 단계가 대상에 어디까지 손을 댔는가. 뒤로 갈수록 되돌리기 어렵다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Touched {
@@ -105,6 +120,7 @@ impl Prep {
             },
             Touched::Layout => DeviceError::TargetErased {
                 code: code_of(&e),
+                refused: is_write_refusal(&e),
                 message: format!("{ERASED}\n원인: {}\n{}", describe(&e), self.trail()),
             },
         }
@@ -133,15 +149,16 @@ pub fn with_write_context(
     at: Option<u64>,
     prep_notes: &str,
 ) -> DeviceError {
-    // 쓰기 거부만은 "쓰기를 거부했습니다" 라는 문구를 유지한다. 프런트엔드가
-    // 그 문구를 보고 전용 안내를 고르고, 그 안내는 실물에서 여러 번 다듬어진
-    // 것이다. 다만 대상 상태는 여기에도 붙인다 — 그 안내만으로는 "다시 시도"
-    // 라는 말이 USB 가 아직 멀쩡하다는 뜻으로 읽힌다.
-    if let DeviceError::WriteDenied { op } = &e {
-        return DeviceError::Io {
+    // 쓰기 거부는 "쓰기를 거부했습니다" 라는 문구와 함께 **거부였다는 표시**를
+    // 단다. 화면은 그 표시로 전용 안내(제어된 폴더 액세스·백신·탐색기)를 고르고,
+    // 그 안내는 실물에서 여러 번 다듬어진 것이다. 대상 상태도 함께 싣는다 —
+    // 그 안내만으로는 "다시 시도" 라는 말이 USB 가 아직 멀쩡하다는 뜻으로 읽힌다.
+    if is_write_refusal(&e) {
+        return DeviceError::TargetErased {
             code: 5,
+            refused: true,
             message: format!(
-                "장치가 쓰기를 거부했습니다 ({op}, 오프셋 {}).\n{PARTIAL}\n{prep_notes}",
+                "장치가 쓰기를 거부했습니다 ({what}, 오프셋 {}).\n{PARTIAL}\n{prep_notes}",
                 at.unwrap_or(0)
             ),
         };
@@ -152,6 +169,7 @@ pub fn with_write_context(
     };
     DeviceError::TargetErased {
         code: code_of(&e),
+        refused: false,
         message: format!("{PARTIAL}\n{at}\n원인: {}\n{prep_notes}", describe(&e)),
     }
 }
@@ -281,7 +299,7 @@ mod tests {
         let out = p.explain(DeviceError::Locked {
             op: "물리 디스크 열기(쓰기)",
         });
-        let DeviceError::TargetErased { code, message } = out else {
+        let DeviceError::TargetErased { code, message, .. } = out else {
             panic!("지워진 뒤의 실패가 그대로 올라갔다: {out:?}");
         };
         assert_eq!(code, 32, "Win32 코드가 사라졌다");
@@ -364,7 +382,7 @@ mod tests {
             Some(25_165_824),
             notes,
         );
-        let DeviceError::TargetErased { code, message } = out else {
+        let DeviceError::TargetErased { code, message, .. } = out else {
             panic!("실제: {out:?}");
         };
         assert_eq!(code, 32);
@@ -374,6 +392,69 @@ mod tests {
             "준비 기록이 버려졌다: {message}"
         );
         assert!(message.contains("일부만 쓰인"), "실제: {message}");
+    }
+
+    /// 지운 뒤의 실패는 원인이 쓰기 거부였는지를 함께 싣는다.
+    #[test]
+    fn an_erased_target_says_whether_the_device_refused() {
+        let mut p = Prep::new();
+        p.reached(Touched::Layout);
+        let refused = p.explain(DeviceError::WriteDenied { op: DEVICE_WRITE });
+        assert!(matches!(
+            refused,
+            DeviceError::TargetErased { refused: true, .. }
+        ));
+        let locked = p.explain(DeviceError::Locked {
+            op: "볼륨 잠금"
+        });
+        assert!(matches!(
+            locked,
+            DeviceError::TargetErased { refused: false, .. }
+        ));
+    }
+
+    /// 장치가 거부한 것이 **섹터 쓰기가 아니면** 쓰기 거부로 올리지 않는다.
+    ///
+    /// 플러시와 되읽기도 Win32 5 를 받으면 `WriteDenied` 로 온다. 그것까지 쓰기
+    /// 거부로 올리면, 이미지를 다 쓴 뒤 플러시만 실패해도 "백신을 확인하세요" 가
+    /// 뜬다 — `finish()` 가 막으려던 바로 그 화면이다.
+    #[test]
+    fn only_a_refused_sector_write_counts_as_a_refused_write() {
+        for (op, what) in [
+            ("캐시 플러시", "마무리(캐시 플러시)"),
+            ("장치 읽기", "되읽기 검증"),
+        ] {
+            let out = with_write_context(
+                DeviceError::WriteDenied { op },
+                what,
+                None,
+                "준비 단계: 볼륨 1개 잠금, 실패 기록 없음",
+            );
+            let DeviceError::TargetErased {
+                refused, message, ..
+            } = out
+            else {
+                panic!("실제: {out:?}");
+            };
+            assert!(!refused, "{op} 가 쓰기 거부로 올라갔다");
+            assert!(!message.contains("쓰기를 거부"), "실제: {message}");
+            assert!(message.contains(what), "실제: {message}");
+        }
+    }
+
+    /// 지운 뒤에 쓰기 금지로 바뀐 USB 는 고장이다. 제어된 폴더 액세스나 백신을
+    /// 의심하게 하면 안 된다.
+    #[test]
+    fn a_stick_found_write_protected_after_erasure_is_not_a_refusal() {
+        let mut p = Prep::new();
+        p.reached(Touched::Layout);
+        let out = p.explain(DeviceError::WriteDenied {
+            op: "쓰기 금지 매체 확인",
+        });
+        assert!(matches!(
+            out,
+            DeviceError::TargetErased { refused: false, .. }
+        ));
     }
 
     /// 위치가 없는 작업(플러시)도 삼켜지지 않아야 한다.
@@ -395,22 +476,27 @@ mod tests {
         assert!(!message.contains("쓰기를 거부"), "실제: {message}");
     }
 
-    /// 쓰기 거부는 프런트엔드가 문구로 알아본다. 그 문구를 바꾸면 전용 안내가
-    /// 사라지고 일반 실패 화면으로 떨어진다.
+    /// 쓰기 거부는 **거부였다는 사실**을 들고 올라가야 한다. 화면은 그 표시로
+    /// 쓰기 거부 안내를 고른다. 0.5.0 부터 화면이 문구가 아니라 코드를 보면서,
+    /// 문구만 남기던 이 경로는 일반 실패로 떨어졌다.
     #[test]
-    fn a_refused_write_keeps_the_wording_the_ui_recognises() {
+    fn a_refused_write_keeps_the_wording_and_says_it_was_refused() {
         let out = with_write_context(
-            DeviceError::WriteDenied {
-                op: "장치 쓰기"
-            },
+            DeviceError::WriteDenied { op: DEVICE_WRITE },
             "이미지 쓰기",
             Some(8_388_608),
             "준비 단계: 볼륨 0개 잠금, 실패 기록 없음",
         );
-        let DeviceError::Io { code, message } = out else {
+        let DeviceError::TargetErased {
+            code,
+            refused,
+            message,
+        } = out
+        else {
             panic!("실제: {out:?}");
         };
         assert_eq!(code, 5);
+        assert!(refused, "거부였다는 사실이 사라졌다");
         assert!(message.contains("쓰기를 거부"), "실제: {message}");
         assert!(message.contains("8388608"), "실제: {message}");
         assert!(message.contains("준비 단계"), "실제: {message}");

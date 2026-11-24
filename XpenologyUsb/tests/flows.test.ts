@@ -74,7 +74,7 @@ test("burn sends the confirmed selection token and verification choice", async (
   click('[data-disk="2"]');
   click('[data-go="2"]');
   await settle();
-  click('[data-go="3"]');
+  click('[data-go="3"]'); await settle();
   const verify = document.querySelector<HTMLInputElement>("[data-verify]")!;
   verify.checked = true;
   verify.dispatchEvent(new Event("change", { bubbles: true }));
@@ -99,7 +99,7 @@ test("replacement using the same disk number cannot change a confirmed request",
   click('[data-disk="2"]');
   click('[data-go="2"]');
   await settle();
-  click('[data-go="3"]');
+  click('[data-go="3"]'); await settle();
   disks = [disk(2, "replacement"), disk(3, "target")];
   await vi.advanceTimersByTimeAsync(3500);
   acknowledge();
@@ -119,7 +119,7 @@ test("clone preserves both selection tokens and excludes the source from targets
   await settle();
   expect(document.querySelector('[data-disk="2"]')).toBeNull();
   click('[data-disk="3"]');
-  click('[data-go="3"]');
+  click('[data-go="3"]'); await settle();
   await settle();
   expect(invoke).toHaveBeenCalledWith("analyze_source", {
     selectionId: "original",
@@ -163,7 +163,7 @@ test("a late source-analysis failure cannot overwrite the screen after Back", as
   click('[data-go="2"]');
   await settle();
   click('[data-disk="3"]');
-  click('[data-go="3"]');
+  click('[data-go="3"]'); await settle();
   click("[data-back]");
   reject("old analysis failed");
   await settle();
@@ -177,7 +177,7 @@ test("destructive action requires explicit acknowledgment", async () => {
   click('[data-disk="2"]');
   click('[data-go="2"]');
   await settle();
-  click('[data-go="3"]');
+  click('[data-go="3"]'); await settle();
   expect(
     document.querySelector<HTMLButtonElement>('[data-go="4"]')!.disabled,
   ).toBe(true);
@@ -199,7 +199,7 @@ test("clone refuses a target smaller than the analyzed source layout", async () 
   click('[data-go="2"]');
   await settle();
   click('[data-disk="3"]');
-  click('[data-go="3"]');
+  click('[data-go="3"]'); await settle();
   await settle();
   acknowledge();
   expect(
@@ -215,7 +215,7 @@ test("failed cancellation allows retry without leaving the running operation", a
   click('[data-disk="2"]');
   click('[data-go="2"]');
   await settle();
-  click('[data-go="3"]');
+  click('[data-go="3"]'); await settle();
   acknowledge();
   click('[data-go="4"]');
   await settle();
@@ -252,12 +252,12 @@ test.each(["burn", "clone"])(
     if (mode === "burn") {
       click('[data-go="2"]');
   await settle();
-      click('[data-go="3"]');
+      click('[data-go="3"]'); await settle();
     } else {
       click('[data-go="2"]');
   await settle();
       click('[data-disk="3"]');
-      click('[data-go="3"]');
+      click('[data-go="3"]'); await settle();
       await settle();
     }
     acknowledge();
@@ -306,7 +306,7 @@ test("native checkbox clicks update consent without triggering the root theme at
   click('[data-disk="2"]');
   click('[data-go="2"]');
   await settle();
-  click('[data-go="3"]');
+  click('[data-go="3"]'); await settle();
   const theme = document.documentElement.dataset.theme;
   const consent = document.querySelector<HTMLInputElement>("[data-ack]")!;
   consent.click();
@@ -331,7 +331,7 @@ test("version selection pins the exact release sent for writing", async () => {
   const versions = document.querySelector<HTMLSelectElement>("[data-version]")!;
   versions.value = "release-previous";
   versions.dispatchEvent(new Event("change", { bubbles: true }));
-  click('[data-go="3"]'); acknowledge(); click('[data-go="4"]'); await settle();
+  click('[data-go="3"]'); await settle(); acknowledge(); click('[data-go="4"]'); await settle();
   expect(invoke).toHaveBeenCalledWith("write_image", expect.objectContaining({ imageId: "release-previous" }));
 });
 
@@ -342,7 +342,7 @@ test("local images use a separate backend command after preflight", async () => 
   expect(document.querySelector<HTMLButtonElement>('[data-go="3"]')!.disabled).toBe(true);
   click("[data-pick-image]"); await settle();
   expect(document.querySelector(".image-details")!.textContent).toContain("local.img");
-  click('[data-go="3"]'); acknowledge(); click('[data-go="4"]'); await settle();
+  click('[data-go="3"]'); await settle(); acknowledge(); click('[data-go="4"]'); await settle();
   expect(invoke).toHaveBeenCalledWith("write_local_image", { selectionId: "original", verify: false });
   expect(invoke.mock.calls.some(([name]) => name === "write_image")).toBe(false);
 });
@@ -352,7 +352,7 @@ test("structured cancellation after erasure warns about the changed target", asy
   invoke.mockImplementation((name: string, ...args: unknown[]) => name === "write_image" ? Promise.reject({ code: "canceled", target_erased: true, detail: "" }) : normal(name, ...args));
   click('[data-mode="burn"]'); await settle();
   click('[data-disk="2"]'); click('[data-go="2"]'); await settle();
-  click('[data-go="3"]'); acknowledge(); click('[data-go="4"]'); await settle();
+  click('[data-go="3"]'); await settle(); acknowledge(); click('[data-go="4"]'); await settle();
   expect(document.querySelector(".inline-error")!.textContent).toContain("changed");
   expect(document.querySelector(".what")!.textContent).toContain("canceled");
   expect(document.querySelector(".why")!.textContent).not.toContain("before writing");
@@ -363,7 +363,7 @@ test("eject sends the original selection token", async () => {
   invoke.mockImplementation((name: string, ...args: unknown[]) => name === "write_image" ? Promise.resolve({ loader: "m-shell", tag: "v2", asset_name: "loader.img.gz", bytes_written: 1000, verified: false }) : normal(name, ...args));
   click('[data-mode="burn"]'); await settle();
   click('[data-disk="2"]'); click('[data-go="2"]'); await settle();
-  click('[data-go="3"]'); acknowledge(); click('[data-go="4"]'); await settle();
+  click('[data-go="3"]'); await settle(); acknowledge(); click('[data-go="4"]'); await settle();
   click("[data-eject]"); await settle();
   expect(invoke).toHaveBeenCalledWith("eject_disk", { selectionId: "original" });
 });
@@ -388,4 +388,78 @@ test("a late release response cannot replace a different selected loader", async
   oldResponse([{ id: "stale", tag: "stale", asset_name: "stale.img.gz", size_bytes: 100, checksum: false }]); await settle();
   expect(document.querySelector(".image-details")!.textContent).not.toContain("stale");
   expect(document.querySelector<HTMLSelectElement>("[data-version]")!.value).toBe("release-latest");
+});
+
+const withCommand = (command: string, respond: () => Promise<unknown>) => {
+  const normal = invoke.getMockImplementation()!;
+  invoke.mockImplementation((name: string, ...args: unknown[]) =>
+    name === command ? respond() : normal(name, ...args),
+  );
+};
+const toBurnConfirmation = async () => {
+  click('[data-mode="burn"]'); await settle();
+  click('[data-disk="2"]'); click('[data-go="2"]'); await settle();
+  click('[data-go="3"]'); await settle();
+};
+
+test("controlled folder access needs its own confirmation before erasing", async () => {
+  withCommand("preflight", async () => ["controlled_folder_access"]);
+  await toBurnConfirmation();
+  expect(document.querySelector(".preflight-warning")!.textContent).toContain("Controlled folder access");
+  acknowledge();
+  expect(document.querySelector<HTMLButtonElement>('[data-go="4"]')!.disabled).toBe(true);
+  const risk = document.querySelector<HTMLInputElement>("[data-risk-ack]")!;
+  risk.checked = true;
+  risk.dispatchEvent(new Event("change", { bubbles: true }));
+  expect(document.querySelector<HTMLButtonElement>('[data-go="4"]')!.disabled).toBe(false);
+  click('[data-go="4"]'); await settle();
+  expect(invoke).toHaveBeenCalledWith("write_image", expect.objectContaining({ selectionId: "original" }));
+});
+
+test("no preflight warning leaves the confirmation unchanged", async () => {
+  withCommand("preflight", async () => []);
+  await toBurnConfirmation();
+  expect(document.querySelector(".preflight-warning")).toBeNull();
+  expect(document.querySelector("[data-risk-ack]")).toBeNull();
+  acknowledge();
+  expect(document.querySelector<HTMLButtonElement>('[data-go="4"]')!.disabled).toBe(false);
+});
+
+test("clone confirmation shows the same warning", async () => {
+  withCommand("preflight", async () => ["controlled_folder_access"]);
+  click('[data-mode="clone"]'); await settle();
+  click('[data-disk="2"]'); click('[data-go="2"]'); await settle();
+  click('[data-disk="3"]'); click('[data-go="3"]'); await settle();
+  expect(document.querySelector(".preflight-warning")).not.toBeNull();
+  acknowledge();
+  expect(document.querySelector<HTMLButtonElement>('[data-go="4"]')!.disabled).toBe(true);
+});
+
+test("a refused write after erasure keeps the refusal guidance and explains how to reuse the drive", async () => {
+  withCommand("write_image", () => Promise.reject({ code: "write_denied", target_erased: true, detail: "장치가 쓰기를 거부했습니다 (쓰기, 오프셋 0)." }));
+  await toBurnConfirmation();
+  acknowledge(); click('[data-go="4"]'); await settle();
+  expect(document.querySelector(".what")!.textContent).toContain("refused");
+  expect(document.querySelector(".why")!.textContent).toContain("Controlled folder access");
+  const recovery = document.querySelector(".recovery")!;
+  expect(recovery.textContent).toContain("Disk Management");
+  expect(recovery.textContent).toContain("Disk 2");
+  expect(recovery.textContent).toContain("write-protected");
+});
+
+test("failures that leave the drive untouched do not show recovery steps", async () => {
+  withCommand("write_image", () => Promise.reject({ code: "network", target_erased: false, detail: "timeout" }));
+  await toBurnConfirmation();
+  acknowledge(); click('[data-go="4"]'); await settle();
+  expect(document.querySelector(".error-box")).not.toBeNull();
+  expect(document.querySelector(".recovery")).toBeNull();
+});
+
+test("erasing cannot start before the pre-write check has answered", async () => {
+  withCommand("preflight", () => new Promise(() => {}));
+  await toBurnConfirmation();
+  acknowledge();
+  expect(document.querySelector<HTMLButtonElement>('[data-go="4"]')!.disabled).toBe(true);
+  click('[data-go="4"]'); await settle();
+  expect(invoke.mock.calls.some(([name]) => name === "write_image")).toBe(false);
 });

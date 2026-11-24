@@ -126,3 +126,59 @@ test("image version and local image selection stay visible in compact layouts", 
   await expect(page.locator(".written")).toContainText("bootloader.img");
   await expect(page.locator(".result-status.verified")).toBeVisible();
 });
+
+test("pre-write warning and recovery guidance after a refused write", async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const [lang, theme] = info.project.name.split("-");
+  // 미리보기 모드 대신 Tauri IPC 를 흉내 낸다. 백엔드가 경고를 돌려주고 쓰기를
+  // 거부하는 경우는 미리보기에서 만들 수 없다.
+  await page.addInitScript(({ lang, theme }) => {
+    localStorage.setItem("sftool-language", lang);
+    localStorage.setItem("sftool-theme", theme);
+    let callbacks = 0;
+    const stick = { number: 2, selection_id: "id-2", name: "SanDisk Ultra USB 3.0", size_bytes: 30_752_000_000, size_label: "30.8 GB", drive_letters: [], ready: true, blocked_reason: null, blocked_detail: null };
+    Object.defineProperty(window, "__TAURI_EVENT_PLUGIN_INTERNALS__", {
+      configurable: true,
+      value: { unregisterListener: () => {} },
+    });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {
+        transformCallback: () => ++callbacks,
+        unregisterCallback: () => {},
+        invoke: async (cmd: string) => {
+          if (cmd === "plugin:event|listen") return ++callbacks;
+          if (cmd === "list_disks") return { disks: [stick], notes: [] };
+          if (cmd === "release_images") return [{ id: "r1", tag: "v1.4.2.8", asset_name: "tinycore-redpill.v1.4.2.8.m-shell.img.gz", size_bytes: 1_100_000_000, checksum: false }];
+          if (cmd === "preflight") return ["controlled_folder_access"];
+          if (cmd === "diagnostics") return { app_version: "0.5.0", os: "Windows 10.0 build 26100", arch: "x86_64" };
+          if (cmd === "write_image") throw { code: "write_denied", target_erased: true, detail: "장치가 쓰기를 거부했습니다 (쓰기, 오프셋 0).\nOS code: 5" };
+          return null;
+        },
+      },
+    });
+  }, { lang, theme });
+  await page.clock.install();
+  await page.goto("/");
+  await page.locator('[data-mode="burn"]').click();
+  await page.locator('[data-disk="2"]').click();
+  await page.locator('[data-go="2"]').click();
+  await expect(page.locator('[data-go="3"]')).toBeEnabled();
+  await page.locator('[data-go="3"]').click();
+  await expect(page.locator(".preflight-warning")).toBeVisible();
+  await page.locator("[data-ack]").check();
+  await expect(page.locator('[data-go="4"]')).toBeDisabled();
+  await capture(page, info, "11-preflight-warning");
+  await accessible(page);
+  await page.locator("[data-risk-ack]").focus();
+  await page.keyboard.press("Space");
+  await expect(page.locator('[data-go="4"]')).toBeEnabled();
+  await page.locator('[data-go="4"]').click();
+  await expect(page.locator(".recovery")).toBeVisible();
+  await expect(page.locator(".recovery")).toContainText(/(디스크|Disk) 2\b/);
+  await expect(page.locator(".recovery")).toContainText("30.8 GB");
+  await capture(page, info, "12-recovery");
+  await accessible(page);
+  expect(errors).toEqual([]);
+});

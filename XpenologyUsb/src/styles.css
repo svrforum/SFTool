@@ -216,3 +216,15 @@ select { flex: 1; min-width: 0; height: 32px; border: 1px solid var(--line); bor
   .seg { gap: 4px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } .bar.indeterminate i { width: 100%; opacity: .5; } }
+.preflight-warning { display: flex; gap: 8px; align-items: flex-start; padding: 10px; margin: 8px 0; border: 1px solid var(--warning); border-radius: 5px; background: var(--warning-weak); color: var(--fg); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.preflight-warning .icon { flex: none; width: 18px; height: 18px; color: var(--warning); margin-top: 1px; }
+.preflight-warning strong { display: block; font-size: 13px; color: var(--warning); }
+.preflight-warning p { margin: 4px 0 0; }
+.acknowledgement.risk { margin-bottom: 8px; }
+.acknowledgement.risk input { accent-color: var(--warning); }
+.acknowledgement.risk:has(input:checked) { background: var(--warning-weak); border-color: var(--warning); }
+.recovery { margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); line-height: 1.5; overflow-wrap: anywhere; }
+.recovery summary { font-size: 13px; font-weight: 700; }
+.recovery p { margin: 6px 0 0; }
+.recovery ol { margin: 6px 0 0; padding-left: 18px; }
+.recovery li + li { margin-top: 3px; }
